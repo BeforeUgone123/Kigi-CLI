@@ -208,6 +208,91 @@ async fn thinking_block_emits_reasoning_channel_and_preserved_in_response() {
     }
 }
 
+fn thinking_block(
+    index: u32,
+    start_signature: &str,
+    thinking: &str,
+    signature_deltas: &[&str],
+) -> Vec<Result<MessageStreamEvent, SamplingError>> {
+    let mut events = vec![
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index,
+            content_block: ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: start_signature.into(),
+            },
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index,
+            delta: StreamDelta::ThinkingDelta {
+                thinking: thinking.into(),
+            },
+        }),
+    ];
+    for signature in signature_deltas {
+        events.push(Ok(MessageStreamEvent::ContentBlockDelta {
+            index,
+            delta: StreamDelta::SignatureDelta {
+                signature: (*signature).into(),
+            },
+        }));
+    }
+    events.push(Ok(block_stop(index)));
+    events
+}
+
+async fn reasoning_signatures(
+    blocks: Vec<Vec<Result<MessageStreamEvent, SamplingError>>>,
+) -> Vec<(String, Option<String>)> {
+    let mut events = vec![Ok(message_start())];
+    events.extend(blocks.into_iter().flatten());
+    events.push(Ok(MessageStreamEvent::MessageStop));
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => response
+            .reasoning_items()
+            .map(|r| {
+                let text = r
+                    .summary
+                    .iter()
+                    .map(|rs::SummaryPart::SummaryText(t)| t.text.as_str())
+                    .collect::<String>();
+                (text, r.encrypted_content.clone())
+            })
+            .collect(),
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn every_thinking_block_is_kept_in_order() {
+    let items = reasoning_signatures(vec![
+        thinking_block(0, "", "first", &["sig-a"]),
+        thinking_block(1, "", "second", &["sig-b"]),
+    ])
+    .await;
+    assert_eq!(
+        items,
+        vec![
+            ("first".to_string(), Some("sig-a".to_string())),
+            ("second".to_string(), Some("sig-b".to_string())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn split_signature_deltas_join_into_one_signature() {
+    let items = reasoning_signatures(vec![thinking_block(0, "", "t", &["abc", "def"])]).await;
+    assert_eq!(items, vec![("t".to_string(), Some("abcdef".to_string()))]);
+}
+
+#[tokio::test]
+async fn first_signature_delta_replaces_a_start_seeded_signature() {
+    let items = reasoning_signatures(vec![thinking_block(0, "sig", "t", &["sig"])]).await;
+    assert_eq!(items, vec![("t".to_string(), Some("sig".to_string()))]);
+}
+
 #[tokio::test]
 async fn tool_use_block_assembles_into_tool_call() {
     let tool_start = MessageStreamEvent::ContentBlockStart {

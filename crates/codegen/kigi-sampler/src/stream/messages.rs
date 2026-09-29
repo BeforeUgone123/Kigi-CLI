@@ -46,6 +46,8 @@ struct BlockState {
     args_acc: String,
     thinking_acc: String,
     signature: String,
+    /// The first `SignatureDelta` replaces a start-seeded signature; later ones append.
+    signature_delta_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,13 +111,10 @@ pub fn stream_messages<'a>(
         let mut final_stop_reason: Option<StopReason> = None;
         let mut final_stop_message: Option<String> = None;
 
-        // Assistant-response accumulators (built up as ContentBlockStop
-        // events fire). Reasoning is collected into a synthesized
-        // `rs::ReasoningItem` and emitted as a sibling
-        // `ConversationItem::Reasoning` before the trailing Assistant.
+        // Assistant-response accumulators, filled as ContentBlockStop events fire.
         let mut assistant_text = String::new();
         let mut assistant_tool_calls: Vec<ToolCall> = Vec::new();
-        let mut assistant_reasoning: Option<rs::ReasoningItem> = None;
+        let mut assistant_reasoning: Vec<rs::ReasoningItem> = Vec::new();
 
         // Index counters
         let mut chunk_index: u64 = 0;
@@ -185,6 +184,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: thinking.clone(),
                                 signature: signature.clone(),
+                                signature_delta_seen: false,
                             },
                         );
                         if !first_token_emitted {
@@ -205,6 +205,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                signature_delta_seen: false,
                             },
                         );
                         if !first_token_emitted {
@@ -237,6 +238,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                signature_delta_seen: false,
                             },
                         );
 
@@ -276,7 +278,11 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             StreamDelta::SignatureDelta { signature } => {
-                                state.signature = signature;
+                                if !state.signature_delta_seen {
+                                    state.signature_delta_seen = true;
+                                    state.signature.clear();
+                                }
+                                state.signature.push_str(&signature);
                             }
                             StreamDelta::TextDelta { text } => {
                                 if !text.is_empty() {
@@ -347,7 +353,7 @@ pub fn stream_messages<'a>(
                                     } else {
                                         Some(state.signature)
                                     };
-                                    assistant_reasoning = Some(rs::ReasoningItem {
+                                    assistant_reasoning.push(rs::ReasoningItem {
                                         id: String::new(),
                                         summary,
                                         content: None,
@@ -513,9 +519,7 @@ pub fn stream_messages<'a>(
         });
 
         let mut items: Vec<ConversationItem> = Vec::new();
-        if let Some(r) = assistant_reasoning {
-            items.push(ConversationItem::Reasoning(r));
-        }
+        items.extend(assistant_reasoning.into_iter().map(ConversationItem::Reasoning));
         items.push(assistant_item);
 
         let stream_end = Instant::now();
