@@ -18,7 +18,8 @@ Upstream sync record (update on every sync): fork baseline is upstream
 snapshot `8adf901` (2026-07-16, ≈v0.2.102); bug fixes evaluated and
 selectively ported through upstream `77cd7eb` (2026-08-25, ≈v1.0.10) in
 the 0.1.13 cycle, through `3794978` (2026-09-09, ≈v1.0.24) in the 0.1.15
-cycle, and through `a28ee2b` (2026-09-17, ≈v1.0.35) in the 0.1.16 cycle.
+cycle, through `a28ee2b` (2026-09-17, ≈v1.0.35) in the 0.1.16 cycle, and
+through `2bdd1d6` (2026-09-29, ≈v1.0.45) in the 0.1.19 cycle.
 Upstream is daily "Synced from monorepo" snapshots —
 the commit BODIES carry per-change bullet lists, and
 `crates/codegen/xai-grok-shell/changelogs/` maps releases to dates;
@@ -38,6 +39,17 @@ POST in turn, so the cancel queues behind the hung call;
 `servers/cancel_aware.rs` waits 500 ms, warns, and the transport reset
 then drops the connection. stdio and SSE-mode servers get the cancel.
 The cure is rmcp 3.x (upstream runs 3.2), a major bump not yet taken.
+
+Evaluated in the 0.1.19 window and left for a later cycle: headless `-p`
+interrupt handling (upstream `SignalStreams` plus a headless signals module; Kigi's
+`headless.rs` installs no handler, so SIGINT kills the run without session
+cleanup), the subagent "Cancelling" overlay that outlives the child turn (needs
+upstream's child-turn finalizer and its prompt-id bookkeeping), the honest
+answer for a `spawn_subagent` call cancelled by send-now (a chat-state answers
+channel), the effort picker preselecting the model's default effort and
+accepting menu labels (tied to upstream's `ModelChoice` refactor), and every MCP
+change that rides rmcp 3.x (`bearer_token_file`, argument coercion, elicitation
+notes). The rmcp and tree-sitter major bumps stay open.
 
 Evaluated in the 0.1.16 window and left for a later cycle: MCP qualified
 tool names past 64 chars (first prove the name never reaches a provider
