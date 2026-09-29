@@ -326,7 +326,7 @@ pub(super) fn dispatch_begin_platform_key_entry(
     vec![]
 }
 
-/// A custom provider row was selected: open the first step (base URL).
+/// Custom provider row selected: open the URL step.
 pub(super) fn dispatch_begin_custom_provider_entry(
     app: &mut AppView,
     api: kigi_shell::models::custom::CustomApi,
@@ -344,7 +344,7 @@ pub(super) fn dispatch_begin_custom_provider_entry(
     vec![]
 }
 
-/// Enter in a custom provider step: advance, stay with a reason, or save.
+/// Enter in a custom provider step.
 pub(super) fn dispatch_submit_custom_provider_input(
     app: &mut AppView,
     input: String,

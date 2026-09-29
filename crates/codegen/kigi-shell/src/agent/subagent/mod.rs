@@ -879,6 +879,20 @@ fn log_subagent_model_resolution(
         )),
     );
 }
+/// The parent model's auth scheme: its live catalog entry, else a disk lookup.
+fn parent_auth_scheme(
+    available: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    catalog_id: &acp::ModelId,
+    slug: &str,
+) -> kigi_sampler::AuthScheme {
+    crate::agent::models::entry_for_slug(available, Some(catalog_id.0.as_ref()), slug)
+        .map(|entry| crate::agent::config::auth_facts_of(entry).auth_scheme)
+        .or_else(|| {
+            crate::agent::config::try_resolve_model_credentials(slug, None).map(|r| r.auth_scheme)
+        })
+        .unwrap_or_default()
+}
+
 /// Read the parent session's actual current sampling config.
 ///
 /// Prefers the live state from `ChatStateHandle` (authoritative). Falls back
@@ -897,17 +911,7 @@ async fn read_parent_sampling_config(
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::models::entry_for_slug(
-                &ctx.available_models,
-                Some(ctx.model_id.0.as_ref()),
-                &cfg.model,
-            )
-            .map(|entry| crate::agent::config::auth_facts_of(entry).auth_scheme)
-            .or_else(|| {
-                crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
-                    .map(|r| r.auth_scheme)
-            })
-            .unwrap_or_default();
+            let auth_scheme = parent_auth_scheme(&ctx.available_models, &ctx.model_id, &cfg.model);
             // Claude Pro/Max OAuth Messages adaptation inherits from the parent
             // model's platform (claude-pro-max → true); every other platform,
             // and BYOK, → false, so the API-key paths stay byte-identical.
@@ -2667,3 +2671,32 @@ pub(crate) fn reconcile_orphaned_subagents(
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parent_auth_scheme_tests {
+    use super::*;
+
+    /// A fetched Messages model exists only in the live catalog.
+    #[test]
+    fn a_fetched_entry_gives_its_own_scheme_to_the_child() {
+        let wire: kigi_models::WireModel =
+            serde_json::from_value(serde_json::json!({ "id": "claude-x" })).unwrap();
+        let cfg = crate::agent::models_fetch::wire_model_to_entry(
+            "gw/claude-x".into(),
+            kigi_models::PlatformWireApi::Messages,
+            kigi_models::PlatformKeyHeader::XApiKey,
+            None,
+            true,
+            wire,
+            "https://gw.example/v1",
+        );
+        let available = indexmap::IndexMap::from([(
+            "gw/claude-x".to_owned(),
+            crate::agent::config::ModelEntry::from_config_entry(&cfg),
+        )]);
+
+        let scheme = parent_auth_scheme(&available, &acp::ModelId::new("gw/claude-x"), "claude-x");
+
+        assert_eq!(scheme, kigi_sampler::AuthScheme::XApiKey);
+    }
+}

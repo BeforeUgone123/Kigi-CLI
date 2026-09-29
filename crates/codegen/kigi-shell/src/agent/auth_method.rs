@@ -599,7 +599,7 @@ mod tests {
         );
     }
 
-    /// `custom:<name>` is an API-key login; the picker rows are not loginable.
+    /// `custom:<name>` logs in; picker rows cannot.
     #[test]
     fn custom_provider_method_ids_classify_as_api_key() {
         let kind = AuthMethodKind::from_id(&acp::AuthMethodId::new("custom:my-proxy"));

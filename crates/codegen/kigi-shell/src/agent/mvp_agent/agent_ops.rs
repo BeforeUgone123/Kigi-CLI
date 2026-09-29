@@ -553,7 +553,7 @@ impl MvpAgent {
             tracing::warn!(provider = name, %message, "custom provider login failed");
             emit_login_span(
                 false,
-                "custom-provider",
+                method_id.0.as_ref(),
                 None,
                 Some("custom_provider_invalid_or_missing"),
             );
@@ -561,7 +561,7 @@ impl MvpAgent {
         }
         Ok(self.finish_api_key_login(method_id).await)
     }
-    /// Shared tail of an API-key login: reload config, refresh the catalog.
+    /// Shared tail of an API-key login.
     async fn finish_api_key_login(&self, method_id: acp::AuthMethodId) -> AuthenticateResponse {
         // Rebuild the catalog from the on-disk config: the rebuild freshly
         // resolves platform keys (env > auth.json > config), so the key just

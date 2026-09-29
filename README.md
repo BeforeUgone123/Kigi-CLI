@@ -155,8 +155,8 @@ Anything that speaks the OpenAI Chat Completions API or the Anthropic Messages
 API works: a gateway, a proxy, Ollama, LM Studio, vLLM. In `kigi`, open `/login`
 (or the welcome login screen) and pick **Custom provider (OpenAI compatible)**
 or **(Anthropic compatible)**, then enter a base URL, a name, and an API key.
-Kigi checks the key against
-`GET {base}/models`, saves the provider, and `/model` lists what the endpoint
+Kigi saves the provider,
+checks the key against `GET {base}/models`, and `/model` lists what the endpoint
 serves as `name/model`.
 
 ```toml

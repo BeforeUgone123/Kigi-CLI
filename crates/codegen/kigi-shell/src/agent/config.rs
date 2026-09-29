@@ -3960,8 +3960,7 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
         },
     })
 }
-/// Auth facts of a catalog entry the caller already holds. A fetched entry
-/// exists only in the live catalog, never in a disk reload.
+/// Auth facts of a held live-catalog entry.
 pub(crate) fn auth_facts_of(entry: &ModelEntry) -> ModelAuthFacts {
     ModelAuthFacts {
         byok: if entry.has_own_credentials() {
@@ -5286,7 +5285,7 @@ reasoning_effort = "low"
             auth_scheme: Default::default(),
         }
     }
-    /// A fetched entry's scheme and BYOK status come from the entry itself.
+    /// Scheme and BYOK status come from the entry.
     #[test]
     fn auth_facts_come_from_the_held_entry() {
         let mut model = test_model_entry("claude-x", "https://gw.example/v1", None, None, None);

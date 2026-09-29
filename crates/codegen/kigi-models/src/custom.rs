@@ -165,7 +165,7 @@ pub fn normalize_base_url(raw: &str) -> Result<String, CustomProviderError> {
     Ok(url.to_owned())
 }
 
-/// A valid provider name from a base URL's host, for a login default.
+/// A valid provider name derived from a host.
 pub fn default_name(base_url: &str) -> String {
     let host = base_url
         .split("://")

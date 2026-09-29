@@ -262,7 +262,7 @@ pub enum AuthMode {
     /// Open-platform API-key entry: paste box for a Moonshot key selected
     /// from the welcome login picker. Esc returns to the picker (no quit).
     ApiKeyEntry(PlatformLogin),
-    /// Custom provider login: one field per step; Esc returns to the picker.
+    /// Custom provider login, one field per step.
     CustomProviderEntry(crate::app::custom_entry::CustomEntryStep),
 }
 /// API-key platform login target, selected from the welcome picker. Wraps a

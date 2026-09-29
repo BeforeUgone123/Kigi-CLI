@@ -582,8 +582,7 @@ fn custom_field(app: &AppView) -> crate::app::custom_entry::CustomEntryField {
     }
 }
 
-/// The custom provider flow: URL, then name (prefilled from the host), then
-/// key; the last Enter emits ONE persist+authenticate effect for the provider.
+/// URL, name, key; the last Enter emits one persist effect.
 #[test]
 fn custom_provider_steps_end_in_one_persist_effect() {
     use crate::app::custom_entry::CustomEntryField;
@@ -649,7 +648,7 @@ fn custom_provider_steps_end_in_one_persist_effect() {
     assert!(app.auth_code_input.is_empty());
 }
 
-/// A refused field keeps the user on it and does not emit an effect.
+/// A refused field keeps the user on it.
 #[test]
 fn custom_provider_refusals_stay_on_the_field() {
     use crate::app::custom_entry::CustomEntryField;
@@ -687,7 +686,7 @@ fn custom_provider_refusals_stay_on_the_field() {
     assert!(app.custom_entry.error.is_some());
 }
 
-/// Esc at any step returns to the picker and drops the draft.
+/// Esc returns to the picker and drops the draft.
 #[test]
 fn cancel_custom_provider_entry_returns_to_picker() {
     use kigi_shell::models::custom::CustomApi;

@@ -9,7 +9,7 @@ const PICKER_PREFIX: &str = "custom-";
 const LOGIN_PREFIX: &str = "custom:";
 const ALL_APIS: [CustomApi; 2] = [CustomApi::OpenAi, CustomApi::Anthropic];
 
-/// The picker row that starts the custom provider flow for one wire.
+/// The picker row for one wire.
 pub fn picker_method(api: CustomApi) -> acp::AuthMethod {
     acp::AuthMethod::Agent(
         acp::AuthMethodAgent::new(
@@ -41,7 +41,7 @@ pub fn login_provider_name(id: &str) -> Option<&str> {
     id.strip_prefix(LOGIN_PREFIX)
 }
 
-/// Probes the listing endpoint with the key; the error text never holds the key.
+/// Probes the listing endpoint; errors never hold the key.
 pub(crate) async fn validate_key(credentialed: &CredentialedProvider) -> Result<(), String> {
     let provider = &credentialed.provider;
     let url = provider.models_url();

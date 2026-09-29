@@ -1,4 +1,4 @@
-//! The base URL, name, and key steps of the custom provider login.
+//! Custom provider login steps: base URL, name, key.
 
 use kigi_shell::models::custom::{
     CustomApi, CustomProvider, default_name, normalize_base_url, validate_name,
@@ -26,7 +26,7 @@ impl CustomEntryStep {
         }
     }
 
-    /// Only the key is a secret; URL and name show as typed.
+    /// Only the key is masked.
     pub fn masks_input(self) -> bool {
         self.field == CustomEntryField::Key
     }
@@ -43,9 +43,9 @@ impl CustomEntryStep {
 /// What one Enter press did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CustomEntryOutcome {
-    /// The input stays; `CustomEntryDraft::error` says why, if it does.
+    /// The input stays; the draft error says why.
     Stay,
-    /// Move to the next field with this text in the box.
+    /// Next field, with this text in the box.
     Next {
         field: CustomEntryField,
         prefill: String,

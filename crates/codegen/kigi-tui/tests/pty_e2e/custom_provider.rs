@@ -57,10 +57,7 @@ async fn run_turn(content: &ContentController) -> PtyHarness {
     harness
 }
 
-/// A declared OpenAI-compatible provider supplies the catalog and the turn:
-/// the request goes to `/chat/completions` for the fetched model with the
-/// provider's own key. The house key, which is set in this environment on the
-/// same loopback URL as the session's coding endpoint, never rides it.
+/// An OpenAI provider lists models and uses its own key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn custom_openai_provider_lists_models_and_uses_its_own_key() {
@@ -94,8 +91,7 @@ async fn custom_openai_provider_lists_models_and_uses_its_own_key() {
     harness.quit().expect("clean quit");
 }
 
-/// An Anthropic-compatible provider is reached on `/messages` with
-/// `x-api-key` and `anthropic-version`, and no Bearer header.
+/// An Anthropic provider uses `/messages` with `x-api-key`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn custom_anthropic_provider_uses_messages_and_x_api_key() {
@@ -128,8 +124,7 @@ async fn custom_anthropic_provider_uses_messages_and_x_api_key() {
     harness.quit().expect("clean quit");
 }
 
-/// A saved provider is a complete login: with no house key and no session, the
-/// pager starts authenticated and the turn reaches the provider.
+/// A saved provider alone is a complete login.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn custom_provider_alone_authenticates_at_startup() {

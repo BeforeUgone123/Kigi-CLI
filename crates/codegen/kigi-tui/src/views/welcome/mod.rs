@@ -1294,7 +1294,7 @@ fn render_welcome_authenticating(
         }
 
         AuthMode::ApiKeyEntry(target) => {
-            // Platform API-key paste box: the key comes from the platform console.
+            // Platform API-key paste box.
             let instruction = format!(
                 "Paste your {} API key (from {})",
                 target.vendor(),
@@ -1938,8 +1938,7 @@ pub(crate) fn render_session_picker(
     )
 }
 
-/// Render the auth token input box (loopback mode).
-/// One text field under the logo: instruction, optional error, input box, hints.
+/// One text field under the logo.
 struct EntryBox<'a> {
     instruction: &'a str,
     error: Option<&'a str>,
@@ -2035,6 +2034,7 @@ fn render_entry_box(
     Paragraph::new(hints).render(hint_area, buf);
 }
 
+/// Render the auth token input box (loopback mode).
 fn render_auth_input_box(
     area: Rect,
     buf: &mut Buffer,
@@ -2393,8 +2393,6 @@ mod tests {
         assert!(!text.contains("Moonshot"), "{text}");
     }
 
-    /// The Moonshot API-key entry arm renders the platform copy, the paste
-    /// box, and the esc-back hint — and no OAuth-URL affordances.
     fn render_custom_entry(
         step: crate::app::custom_entry::CustomEntryStep,
         draft: &crate::app::custom_entry::CustomEntryDraft,
@@ -2417,7 +2415,7 @@ mod tests {
         buffer_text(&buf)
     }
 
-    /// The URL and name steps show typed text; only the key step masks it.
+    /// Only the key step masks its input.
     #[test]
     fn custom_entry_arm_masks_only_the_key() {
         use crate::app::custom_entry::{CustomEntryDraft, CustomEntryField, CustomEntryStep};
@@ -2447,7 +2445,7 @@ mod tests {
         assert!(empty.contains("provider name"), "{empty}");
     }
 
-    /// A refusal shows under the instruction so the user sees what to fix.
+    /// A refusal shows under the instruction.
     #[test]
     fn custom_entry_arm_shows_the_refusal() {
         use crate::app::custom_entry::{CustomEntryDraft, CustomEntryStep};
@@ -2460,6 +2458,8 @@ mod tests {
         assert!(text.contains("must start with http"), "{text}");
     }
 
+    /// The Moonshot API-key entry arm renders the platform copy, the paste
+    /// box, and the esc-back hint — and no OAuth-URL affordances.
     #[test]
     fn api_key_entry_arm_shows_platform_copy_and_paste_box() {
         let area = Rect::new(0, 0, 80, 40);
