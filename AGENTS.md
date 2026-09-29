@@ -415,15 +415,17 @@ client-side, no backend surface.
       carries the thinking level. NO websocket, NO base_instructions.
       CATALOG is HARDCODED (`PlatformId::hardcoded_catalog` →
       `openai_codex_wire_models`, mapped through the SAME
-      `platform_wire_model_to_entry` output): the 7 `visibility=list` &&
-      `supported_in_api=true` models the backend served on 2026-09-22
-      (`gpt-6-astra/sol/luna`, `gpt-5.6-sol/terra/luna`, `gpt-5.5`, ctx 272000,
-      per-model efforts) — NO live `/models` fetch, NO codex-CLI / `~/.codex`
+      `platform_wire_model_to_entry` output): the 8 `visibility=list` &&
+      `supported_in_api=true` models the backend served on 2026-09-29
+      (`gpt-6.1-sol`, `gpt-6-astra/sol/luna`, `gpt-5.6-sol/terra/luna`,
+      `gpt-5.5`, ctx 272000, per-model efforts) — NO live `/models` fetch, NO codex-CLI / `~/.codex`
       dependency; the hidden `gpt-reserve` and `codex-auto-review` are
       EXCLUDED. Refresh the table by reading
       `GET {base}/models?client_version=<a current codex release>` with a
       ChatGPT bearer: an old `client_version` is answered with a truncated
       list, so a stale version reads as "the model does not exist".
+      `CODEX_USER_AGENT` (`codex_cli_rs/0.159.0`) moves with the release used
+      for that read.
   - `OAuthFlow::GithubDeviceCopilot` → `auth::github_copilot` (TWO-STAGE).
     Provider: `github-copilot` (`scope_key oauth/github-copilot`, base
     `api.individual.githubcopilot.com`, ChatCompletions wire). Stage 1 is an
@@ -457,6 +459,39 @@ client-side, no backend surface.
   token (`resolve_generic_oauth_tokens`, refreshed on expiry) and routes
   `platform.oauth().is_some()` → `platform.base_url()` (kimi-code alone →
   `proxy_url()`). Tokens/codes/verifiers are NEVER logged.
+- CUSTOM PROVIDERS (0.1.19): `[platforms.<name>]` with `base_url` and `api =
+  "openai" | "anthropic"` declares a provider outside the closed registry.
+  `kigi-models/src/custom.rs` owns the validated type (name `[a-z0-9][a-z0-9_-]{0,31}`,
+  never a registry id; base URL `http(s)://host[/path]`, no userinfo, query or
+  fragment); `kigi-shell/src/agent/custom_providers/` owns the rest. Key order:
+  auth.json scope `<name>`, then the table's `api_key`; a key is REQUIRED (a
+  keyless declaration is inert). Wires: openai = `/chat/completions`, Bearer,
+  `GET {base}/models`; anthropic = `/messages`, `x-api-key`,
+  `GET {base}/models?limit=1000`. Catalog keys are `<name>/<model>`; the entry's
+  `description` carries the provider name for the picker. Entries reach the disk
+  cache without a key; `stamp_credentials` stamps `api_key` in memory, only onto
+  entries still on the provider's own host, and `drop_orphans` removes fetched
+  entries of a provider that is gone or keyless BEFORE the prefetched map replaces
+  the catalog (a stale unkeyed entry would fall through to the house key).
+  CREDENTIAL RULE: `EndpointsConfig.custom_provider_bases` (derived from
+  `[platforms.*]` in `Config::new_from_toml_cfg` and `from_config_value`, never
+  serialized) makes `CredentialAuthority::is_session_coding_endpoint` false for a
+  declared base, loopback included — without it an Ollama-style provider on
+  localhost classifies `Primary` and the Kimi bearer replaces its key. Every
+  authority is built from the models manager's config, so the field reaches all of
+  them. Turns and subagents read `auth_scheme` and BYOK status from the LIVE
+  catalog entry (`auth_facts_of`), not from a disk reload: fetched entries never
+  live on disk, and the reload sent fetched Messages models out with `Bearer`
+  instead of `x-api-key` (this also repaired `anthropic` and `minimax`).
+  Login: picker rows `custom-openai` / `custom-anthropic` are not loginable
+  (`AuthMethodKind::Unknown`); the TUI asks base URL, name (default from the
+  host), key, then `save_custom_provider` writes config.toml (through
+  `config_write_dest`) and auth.json, and `authenticate("custom:<name>")`
+  validates `GET {base}/models` (401/403 = rejected key, other non-2xx and network
+  errors surface). Limits: context window 256K unless the listing serves
+  `context_length` (Anthropic: `max_input_tokens`); no models.dev enrichment; a
+  failed key check leaves the saved definition (login again with the same name to
+  overwrite); no delete UI, edit config.toml and auth.json.
 - A stored subscription-OAuth session IS a catalog fetch source. Every
   fetch-PLAN decision that cannot afford real token resolution — the startup
   prefetch arming gate, `on_auth_changed`'s wipe guard

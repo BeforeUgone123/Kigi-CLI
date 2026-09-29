@@ -86,8 +86,8 @@ On by default. `KIGI_GRAPH=0` turns it off; `KIGI_GRAPH_CONCURRENCY` (default
 
 ## Providers and API keys
 
-29 platforms ship compiled in: 5 you sign into, 24 you hand a key. Nothing is
-registered at runtime — if it's not in this list, it's not there.
+29 platforms ship compiled in: 5 you sign into, 24 you hand a key. Anything
+else is an endpoint you declare yourself ([your own endpoint](#your-own-endpoint)).
 
 **Sign in with a subscription you already pay for.** Run `kigi login` and pick.
 Each provider's token is stored under its own key, and one provider's
@@ -148,6 +148,28 @@ api_key = "sk-..."
 [platforms.xai]
 api_key = "xai-..."
 ```
+
+### Your own endpoint
+
+Anything that speaks the OpenAI Chat Completions API or the Anthropic Messages
+API works: a gateway, a proxy, Ollama, LM Studio, vLLM. In `kigi`, open `/login`
+(or the welcome login screen) and pick **Custom provider (OpenAI compatible)**
+or **(Anthropic compatible)**, then enter a base URL, a name, and an API key.
+Kigi checks the key against
+`GET {base}/models`, saves the provider, and `/model` lists what the endpoint
+serves as `name/model`.
+
+```toml
+# ~/.kigi/config.toml
+[platforms.my-gateway]
+base_url = "https://gateway.example.com/v1"   # include /v1 when the API lives there
+api = "openai"                                # or "anthropic"
+api_key = "sk-..."                            # or store it in ~/.kigi/auth.json under "my-gateway"
+```
+
+A key is required. A local server that ignores auth takes any value. The
+context window is 256K unless the endpoint reports one. To remove a provider,
+delete its table and its `auth.json` entry.
 
 Model lists sync on startup. Pick one with `/model`, set its thinking level
 with `/effort`.
