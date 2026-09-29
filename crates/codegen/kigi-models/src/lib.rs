@@ -16,6 +16,7 @@
 
 use std::sync::LazyLock;
 
+pub mod custom;
 pub mod enrichment;
 
 // Platform registry (PRD F2)
