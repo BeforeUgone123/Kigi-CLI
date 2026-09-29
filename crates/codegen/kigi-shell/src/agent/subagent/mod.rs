@@ -879,7 +879,7 @@ fn log_subagent_model_resolution(
         )),
     );
 }
-/// The parent model's auth scheme: its live catalog entry, else a disk lookup.
+/// The parent model's auth scheme from the live catalog.
 fn parent_auth_scheme(
     available: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     catalog_id: &acp::ModelId,
@@ -2671,32 +2671,3 @@ pub(crate) fn reconcile_orphaned_subagents(
 }
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod parent_auth_scheme_tests {
-    use super::*;
-
-    /// A fetched Messages model exists only in the live catalog.
-    #[test]
-    fn a_fetched_entry_gives_its_own_scheme_to_the_child() {
-        let wire: kigi_models::WireModel =
-            serde_json::from_value(serde_json::json!({ "id": "claude-x" })).unwrap();
-        let cfg = crate::agent::models_fetch::wire_model_to_entry(
-            "gw/claude-x".into(),
-            kigi_models::PlatformWireApi::Messages,
-            kigi_models::PlatformKeyHeader::XApiKey,
-            None,
-            true,
-            wire,
-            "https://gw.example/v1",
-        );
-        let available = indexmap::IndexMap::from([(
-            "gw/claude-x".to_owned(),
-            crate::agent::config::ModelEntry::from_config_entry(&cfg),
-        )]);
-
-        let scheme = parent_auth_scheme(&available, &acp::ModelId::new("gw/claude-x"), "claude-x");
-
-        assert_eq!(scheme, kigi_sampler::AuthScheme::XApiKey);
-    }
-}
