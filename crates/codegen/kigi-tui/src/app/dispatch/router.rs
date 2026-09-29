@@ -1,8 +1,9 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_begin_platform_key_entry, dispatch_cancel_login, dispatch_cancel_platform_key_entry,
-    dispatch_login, dispatch_login_with, dispatch_logout, dispatch_open_login_picker,
-    dispatch_submit_auth_code, dispatch_submit_platform_api_key, dispatch_switch_account,
+    dispatch_begin_custom_provider_entry, dispatch_begin_platform_key_entry, dispatch_cancel_login,
+    dispatch_cancel_platform_key_entry, dispatch_login, dispatch_login_with, dispatch_logout,
+    dispatch_open_login_picker, dispatch_submit_auth_code, dispatch_submit_custom_provider_input,
+    dispatch_submit_platform_api_key, dispatch_switch_account,
 };
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection,
@@ -889,6 +890,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::BeginPlatformKeyEntry(target) => dispatch_begin_platform_key_entry(app, target),
         Action::CancelPlatformKeyEntry => dispatch_cancel_platform_key_entry(app),
         Action::SubmitPlatformApiKey(key) => dispatch_submit_platform_api_key(app, key),
+        Action::BeginCustomProviderEntry(api) => dispatch_begin_custom_provider_entry(app, api),
+        Action::SubmitCustomProviderInput(input) => {
+            dispatch_submit_custom_provider_input(app, input)
+        }
         Action::CopyAuthUrl => {
             if let AuthState::Authenticating {
                 auth_url: Some(url),

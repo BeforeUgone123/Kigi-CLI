@@ -5,9 +5,12 @@ use kigi_models::custom::{CustomApi, CustomProvider};
 use crate::agent::config::{PlatformCredentialConfig, PlatformsConfig};
 
 mod fetch;
+mod login;
 mod save;
 
 pub(crate) use fetch::{drop_orphans, fetch_models_blocking, stamp_credentials};
+pub(crate) use login::validate_key;
+pub use login::{login_method_id, login_provider_name, picker_api, picker_methods};
 pub use save::save_custom_provider;
 
 /// Tables setting `base_url` or `api`, valid or not.

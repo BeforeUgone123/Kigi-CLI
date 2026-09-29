@@ -526,6 +526,43 @@ impl MvpAgent {
                     Some("platform_key_invalid_or_missing"),
                 );
             })?;
+        Ok(self.finish_api_key_login(method_id).await)
+    }
+    /// `authenticate(custom:<name>)`: validate the saved provider's key.
+    pub(super) async fn authenticate_custom_provider(
+        &self,
+        name: &str,
+        method_id: acp::AuthMethodId,
+    ) -> Result<AuthenticateResponse, acp::Error> {
+        let keys =
+            crate::agent::models::PlatformApiKeys::resolve_from_effective_config();
+        let auth_err = |message: String| {
+            let mut err = acp::Error::auth_required();
+            err.message = message;
+            err
+        };
+        let outcome = match keys.custom().iter().find(|c| c.provider.name == name) {
+            Some(credentialed) => {
+                crate::agent::custom_providers::validate_key(credentialed).await
+            }
+            None => Err(format!(
+                "No custom provider named {name} with an API key in config.toml or auth.json"
+            )),
+        };
+        if let Err(message) = outcome {
+            tracing::warn!(provider = name, %message, "custom provider login failed");
+            emit_login_span(
+                false,
+                "custom-provider",
+                None,
+                Some("custom_provider_invalid_or_missing"),
+            );
+            return Err(auth_err(message));
+        }
+        Ok(self.finish_api_key_login(method_id).await)
+    }
+    /// Shared tail of an API-key login: reload config, refresh the catalog.
+    async fn finish_api_key_login(&self, method_id: acp::AuthMethodId) -> AuthenticateResponse {
         // Rebuild the catalog from the on-disk config: the rebuild freshly
         // resolves platform keys (env > auth.json > config), so the key just
         // persisted to auth.json is stamped onto the platform's entries; a
@@ -557,7 +594,7 @@ impl MvpAgent {
         let meta = serde_json::to_value(auth_meta)
             .ok()
             .and_then(|v| v.as_object().cloned());
-        Ok(AuthenticateResponse::new().meta(meta))
+        AuthenticateResponse::new().meta(meta)
     }
     /// `authenticate(<generic-oauth platform id>)`: interactive device-code
     /// login for a `uses_oauth` platform carrying an `OAuthConfig` (xai-grok).

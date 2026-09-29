@@ -15,6 +15,8 @@ mod agent_response;
 mod auto_compact_top_row;
 #[path = "pty_e2e/basename_path_demo_pty.rs"]
 mod basename_path_demo_pty;
+#[path = "pty_e2e/custom_provider.rs"]
+mod custom_provider;
 #[path = "pty_e2e/doubled_lines_out_of_band_repro.rs"]
 mod doubled_lines_out_of_band_repro;
 #[path = "pty_e2e/initial_prompt_positional_auto_submits.rs"]

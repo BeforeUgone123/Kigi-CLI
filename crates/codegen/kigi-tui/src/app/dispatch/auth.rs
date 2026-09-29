@@ -8,6 +8,7 @@ use crate::app::actions::{Action, Effect};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, AuthMode, AuthState, PlatformLogin};
+use crate::app::custom_entry::{CustomEntryOutcome, CustomEntryStep};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 
@@ -325,6 +326,73 @@ pub(super) fn dispatch_begin_platform_key_entry(
     vec![]
 }
 
+/// A custom provider row was selected: open the first step (base URL).
+pub(super) fn dispatch_begin_custom_provider_entry(
+    app: &mut AppView,
+    api: kigi_shell::models::custom::CustomApi,
+) -> Vec<Effect> {
+    let request_seq = app.next_auth_request_seq;
+    app.next_auth_request_seq += 1;
+    app.auth_code_input.clear();
+    app.custom_entry.clear();
+    app.auth_state = AuthState::Authenticating {
+        request_seq,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::CustomProviderEntry(CustomEntryStep::first(api)),
+    };
+    vec![]
+}
+
+/// Enter in a custom provider step: advance, stay with a reason, or save.
+pub(super) fn dispatch_submit_custom_provider_input(
+    app: &mut AppView,
+    input: String,
+) -> Vec<Effect> {
+    let (request_seq, step) = match &app.auth_state {
+        AuthState::Authenticating {
+            request_seq,
+            mode: AuthMode::CustomProviderEntry(step),
+            ..
+        } => (*request_seq, *step),
+        _ => return vec![],
+    };
+    match app.custom_entry.submit(step, &input) {
+        CustomEntryOutcome::Stay => vec![],
+        CustomEntryOutcome::Next { field, prefill } => {
+            app.auth_code_input = prefill;
+            app.auth_state = AuthState::Authenticating {
+                request_seq,
+                handle: None,
+                auth_url: None,
+                mode: AuthMode::CustomProviderEntry(CustomEntryStep {
+                    api: step.api,
+                    field,
+                }),
+            };
+            vec![]
+        }
+        CustomEntryOutcome::Done { provider, key } => {
+            app.auth_in_flight_method = Some(kigi_shell::agent::custom_providers::login_method_id(
+                &provider.name,
+            ));
+            app.custom_entry.clear();
+            app.auth_code_input.clear();
+            app.auth_state = AuthState::Authenticating {
+                request_seq,
+                handle: None,
+                auth_url: None,
+                mode: AuthMode::Pending,
+            };
+            vec![Effect::PersistCustomProviderAndAuthenticate {
+                request_seq,
+                provider,
+                key,
+            }]
+        }
+    }
+}
+
 /// Esc in the API-key paste box: back to the login picker (no error line).
 /// Bumps the request seq so any stale in-flight auth result is dropped by
 /// the `AuthComplete`/`AuthFailed` guards.
@@ -332,7 +400,7 @@ pub(super) fn dispatch_cancel_platform_key_entry(app: &mut AppView) -> Vec<Effec
     if !matches!(
         app.auth_state,
         AuthState::Authenticating {
-            mode: AuthMode::ApiKeyEntry(_),
+            mode: AuthMode::ApiKeyEntry(_) | AuthMode::CustomProviderEntry(_),
             ..
         }
     ) {
@@ -340,6 +408,7 @@ pub(super) fn dispatch_cancel_platform_key_entry(app: &mut AppView) -> Vec<Effec
     }
     app.next_auth_request_seq += 1;
     app.auth_code_input.clear();
+    app.custom_entry.clear();
     app.auth_state = AuthState::Pending { error: None };
     vec![]
 }

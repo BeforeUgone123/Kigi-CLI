@@ -571,3 +571,141 @@ fn auth_complete_marks_the_authenticated_method_connected() {
         "other methods must stay unmarked"
     );
 }
+
+fn custom_field(app: &AppView) -> crate::app::custom_entry::CustomEntryField {
+    match &app.auth_state {
+        AuthState::Authenticating {
+            mode: AuthMode::CustomProviderEntry(step),
+            ..
+        } => step.field,
+        other => panic!("expected a custom provider step, got {other:?}"),
+    }
+}
+
+/// The custom provider flow: URL, then name (prefilled from the host), then
+/// key; the last Enter emits ONE persist+authenticate effect for the provider.
+#[test]
+fn custom_provider_steps_end_in_one_persist_effect() {
+    use crate::app::custom_entry::CustomEntryField;
+    use kigi_shell::models::custom::CustomApi;
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+
+    let effects = dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::Anthropic),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(custom_field(&app), CustomEntryField::BaseUrl);
+    let seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => *request_seq,
+        _ => unreachable!(),
+    };
+
+    dispatch(
+        Action::SubmitCustomProviderInput("https://api.gw.example/v1/".into()),
+        &mut app,
+    );
+    assert_eq!(custom_field(&app), CustomEntryField::Name);
+    assert_eq!(
+        app.auth_code_input, "gw-example",
+        "the name is prefilled from the host"
+    );
+
+    dispatch(Action::SubmitCustomProviderInput("gw".into()), &mut app);
+    assert_eq!(custom_field(&app), CustomEntryField::Key);
+    assert!(app.auth_code_input.is_empty(), "the key box starts empty");
+
+    let effects = dispatch(Action::SubmitCustomProviderInput("sk-gw".into()), &mut app);
+    match effects.as_slice() {
+        [
+            Effect::PersistCustomProviderAndAuthenticate {
+                request_seq,
+                provider,
+                key,
+            },
+        ] => {
+            assert_eq!(*request_seq, seq);
+            assert_eq!(provider.name, "gw");
+            assert_eq!(provider.api, CustomApi::Anthropic);
+            assert_eq!(provider.base_url, "https://api.gw.example/v1");
+            assert_eq!(key, "sk-gw");
+        }
+        other => panic!("expected exactly the persist effect, got {other:?}"),
+    }
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Authenticating {
+            request_seq,
+            mode: AuthMode::Pending,
+            ..
+        } if request_seq == seq
+    ));
+    assert_eq!(
+        app.auth_in_flight_method.as_ref().map(|m| m.0.as_ref()),
+        Some("custom:gw")
+    );
+    assert!(app.auth_code_input.is_empty());
+}
+
+/// A refused field keeps the user on it and does not emit an effect.
+#[test]
+fn custom_provider_refusals_stay_on_the_field() {
+    use crate::app::custom_entry::CustomEntryField;
+    use kigi_shell::models::custom::CustomApi;
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::OpenAi),
+        &mut app,
+    );
+
+    assert!(
+        dispatch(
+            Action::SubmitCustomProviderInput("host.example".into()),
+            &mut app
+        )
+        .is_empty()
+    );
+    assert_eq!(custom_field(&app), CustomEntryField::BaseUrl);
+    assert!(app.custom_entry.error.is_some());
+
+    dispatch(
+        Action::SubmitCustomProviderInput("https://h.example/v1".into()),
+        &mut app,
+    );
+    assert!(
+        dispatch(
+            Action::SubmitCustomProviderInput("anthropic".into()),
+            &mut app
+        )
+        .is_empty()
+    );
+    assert_eq!(custom_field(&app), CustomEntryField::Name);
+    assert!(app.custom_entry.error.is_some());
+}
+
+/// Esc at any step returns to the picker and drops the draft.
+#[test]
+fn cancel_custom_provider_entry_returns_to_picker() {
+    use kigi_shell::models::custom::CustomApi;
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::OpenAi),
+        &mut app,
+    );
+    dispatch(Action::SubmitCustomProviderInput("nope".into()), &mut app);
+    assert!(app.custom_entry.error.is_some());
+    let seq_before = app.next_auth_request_seq;
+
+    let effects = dispatch(Action::CancelPlatformKeyEntry, &mut app);
+
+    assert!(effects.is_empty());
+    assert!(matches!(app.auth_state, AuthState::Pending { error: None }));
+    assert!(app.custom_entry.error.is_none());
+    assert!(app.next_auth_request_seq > seq_before);
+}

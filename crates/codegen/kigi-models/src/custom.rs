@@ -165,9 +165,59 @@ pub fn normalize_base_url(raw: &str) -> Result<String, CustomProviderError> {
     Ok(url.to_owned())
 }
 
+/// A valid provider name from a base URL's host, for a login default.
+pub fn default_name(base_url: &str) -> String {
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|authority| authority.split(':').next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let labels: Vec<&str> = host
+        .split('.')
+        .filter(|label| !label.is_empty() && !matches!(*label, "api" | "www"))
+        .collect();
+    let joined: String = labels
+        .join("-")
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+        .take(MAX_NAME_LEN)
+        .collect();
+    let name = joined.trim_matches('-').to_owned();
+    if validate_name(&name).is_ok() {
+        name
+    } else {
+        "custom".to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_names_come_from_the_host() {
+        for (url, expected) in [
+            ("https://api.together.xyz/v1", "together-xyz"),
+            ("https://openrouter.ai/api/v1", "openrouter-ai"),
+            ("http://localhost:11434/v1", "localhost"),
+            ("http://127.0.0.1:8080/v1", "127-0-0-1"),
+            ("https://api.openai.com/v1", "openai-com"),
+            (
+                "https://gateway.internal.example.org/anthropic",
+                "gateway-internal-example-org",
+            ),
+            ("https://API.Example.COM/v1", "example-com"),
+            ("not a url", "custom"),
+            ("https://api/v1", "custom"),
+            ("https://[::1]:9000/v1", "custom"),
+        ] {
+            assert_eq!(default_name(url), expected, "{url}");
+            assert!(validate_name(&default_name(url)).is_ok(), "{url}");
+        }
+        assert!(default_name(&format!("https://{}.example/v1", "a".repeat(60))).len() <= 32);
+    }
 
     #[test]
     fn api_round_trips_and_maps_to_the_wire() {

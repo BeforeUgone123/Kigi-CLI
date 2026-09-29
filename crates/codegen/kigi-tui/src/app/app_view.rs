@@ -262,6 +262,8 @@ pub enum AuthMode {
     /// Open-platform API-key entry: paste box for a Moonshot key selected
     /// from the welcome login picker. Esc returns to the picker (no quit).
     ApiKeyEntry(PlatformLogin),
+    /// Custom provider login: one field per step; Esc returns to the picker.
+    CustomProviderEntry(crate::app::custom_entry::CustomEntryStep),
 }
 /// API-key platform login target, selected from the welcome picker. Wraps a
 /// non-OAuth registry platform ([`kigi_shell::models::PlatformId`]);
@@ -310,6 +312,11 @@ pub enum PendingMenuItem {
         target: PlatformLogin,
         label: String,
     },
+    /// Custom provider login for one wire.
+    CustomProvider {
+        api: kigi_shell::models::custom::CustomApi,
+        label: String,
+    },
     Quit,
 }
 impl PendingMenuItem {
@@ -324,7 +331,9 @@ impl PendingMenuItem {
     }
     pub fn label(&self) -> &str {
         match self {
-            Self::Login { label, .. } | Self::ApiKey { label, .. } => label,
+            Self::Login { label, .. }
+            | Self::ApiKey { label, .. }
+            | Self::CustomProvider { label, .. } => label,
             Self::Quit => "Quit",
         }
     }
@@ -366,7 +375,12 @@ pub fn pending_menu_items(
     use kigi_shell::agent::auth_method::AuthMethodKind;
     let mut items: Vec<PendingMenuItem> = Vec::new();
     for method in auth_methods {
-        if let Some(target) = PlatformLogin::from_method_id(method.id()) {
+        if let Some(api) = kigi_shell::agent::custom_providers::picker_api(method.id().0.as_ref()) {
+            items.push(PendingMenuItem::CustomProvider {
+                api,
+                label: method.name().to_string(),
+            });
+        } else if let Some(target) = PlatformLogin::from_method_id(method.id()) {
             items.push(PendingMenuItem::ApiKey {
                 target,
                 label: method.name().to_string(),
@@ -908,6 +922,8 @@ pub struct AppView {
     pub auth_start_mode: AuthMode,
     /// Text buffer for manual auth token paste (loopback mode).
     pub auth_code_input: String,
+    /// Values collected by the custom provider login steps.
+    pub custom_entry: crate::app::custom_entry::CustomEntryDraft,
     /// Monotonically increasing sequence number for auth requests.
     pub next_auth_request_seq: u64,
     /// Every session/chat/worktree/prompt action deferred behind startup gates.
@@ -1111,6 +1127,7 @@ impl AppView {
             login_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
+            custom_entry: Default::default(),
             next_auth_request_seq: 1,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -2648,7 +2665,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::Unchanged;
             }
             AuthState::Authenticating {
-                mode: AuthMode::ApiKeyEntry(_),
+                mode: mode @ (AuthMode::ApiKeyEntry(_) | AuthMode::CustomProviderEntry(_)),
                 ..
             } => {
                 // Esc cancels BACK TO THE PICKER (unlike the OAuth flows,
@@ -2664,6 +2681,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
                 if key!(Enter).matches(key) {
                     let trimmed = ctx.auth_code_input.trim().to_string();
+                    if matches!(mode, AuthMode::CustomProviderEntry(_)) {
+                        return InputOutcome::Action(Action::SubmitCustomProviderInput(trimmed));
+                    }
                     if !trimmed.is_empty() {
                         return InputOutcome::Action(Action::SubmitPlatformApiKey(trimmed));
                     }
@@ -2726,7 +2746,8 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::ActionThenForward(Action::NewSession);
             }
             AuthState::Authenticating {
-                mode: AuthMode::Loopback | AuthMode::ApiKeyEntry(_),
+                mode:
+                    AuthMode::Loopback | AuthMode::ApiKeyEntry(_) | AuthMode::CustomProviderEntry(_),
                 ..
             } => {
                 let cleaned: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
@@ -2888,6 +2909,9 @@ fn dispatch_pending_menu_action(
         }) => InputOutcome::Action(Action::Login),
         Some(PendingMenuItem::ApiKey { target, .. }) => {
             InputOutcome::Action(Action::BeginPlatformKeyEntry(*target))
+        }
+        Some(PendingMenuItem::CustomProvider { api, .. }) => {
+            InputOutcome::Action(Action::BeginCustomProviderEntry(*api))
         }
         Some(PendingMenuItem::Quit) if mid_session => InputOutcome::Action(Action::CancelLogin),
         Some(PendingMenuItem::Quit) => InputOutcome::Action(Action::Quit),
@@ -3223,6 +3247,7 @@ impl AppView {
                             auth_methods: &self.auth_methods,
                             login_label: self.login_label.as_deref(),
                             auth_code_input: &self.auth_code_input,
+                            custom_entry: &self.custom_entry,
                             clipboard_copied: self.auth_clipboard_copied,
                             show_raw_url: self.auth_show_raw_url,
                             tip,
@@ -4358,6 +4383,7 @@ pub(crate) mod tests {
             login_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
+            custom_entry: Default::default(),
             next_auth_request_seq: 1,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -7005,7 +7031,7 @@ pub(crate) mod tests {
     #[test]
     fn pending_menu_items_lists_interactive_methods_plus_quit() {
         let items = pending_menu_items(&fresh_user_auth_methods(), None);
-        assert_eq!(items.len(), 30, "29 login rows + Quit, got {items:?}");
+        assert_eq!(items.len(), 32, "31 login rows + Quit, got {items:?}");
         assert_login_row(&items[0], "kimi-code", "Kimi Code (OAuth)");
         assert_login_row(&items[1], "xai-grok", "xAI Grok (subscription) (OAuth)");
         assert_login_row(
@@ -7192,7 +7218,28 @@ pub(crate) mod tests {
                 label: "MiniMax China (API key)".into(),
             }
         );
-        assert_eq!(items[29], PendingMenuItem::Quit);
+        assert_eq!(
+            items[29],
+            PendingMenuItem::CustomProvider {
+                api: kigi_shell::models::custom::CustomApi::OpenAi,
+                label: "Custom provider (OpenAI compatible)".into(),
+            }
+        );
+        assert_eq!(
+            items[30],
+            PendingMenuItem::CustomProvider {
+                api: kigi_shell::models::custom::CustomApi::Anthropic,
+                label: "Custom provider (Anthropic compatible)".into(),
+            }
+        );
+        assert_eq!(items[31], PendingMenuItem::Quit);
+        assert!(!items[29].connected(&fresh_user_auth_methods()));
+        assert!(matches!(
+            dispatch_pending_menu_action(&items, 30, false),
+            InputOutcome::Action(Action::BeginCustomProviderEntry(
+                kigi_shell::models::custom::CustomApi::Anthropic
+            ))
+        ));
         // The non-interactive methods must never appear as rows.
         let byok = kigi_shell::agent::auth_method::build_auth_methods(
             kigi_shell::agent::auth_method::AuthMethodsBuildInputs {
@@ -7203,8 +7250,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             pending_menu_items(&byok.methods, None).len(),
-            30,
-            "xai.api_key / cached_token must not add rows (29 login rows + Quit)"
+            32,
+            "xai.api_key / cached_token must not add rows (31 login rows + Quit)"
         );
     }
     /// Startup lands on the picker only when there is a real choice: the

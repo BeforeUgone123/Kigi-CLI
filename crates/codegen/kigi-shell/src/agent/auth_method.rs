@@ -114,6 +114,7 @@ pub struct BuiltAuthMethods {
 ///    `PlatformId::ALL` order — interactive logins after `kimi-code`
 /// 5. every API-key registry platform, in `PlatformId::ALL` order
 ///    (`moonshot-cn`, `moonshot-ai`, …), always advertised
+/// 6. the two custom provider rows (`custom-openai`, `custom-anthropic`)
 ///
 /// The platform methods are for the INTERACTIVE login picker only: they come
 /// after `kimi-code` so they can never become `auth_methods.first()` (the
@@ -174,6 +175,7 @@ pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethod
             methods.push(platform_auth_method(platform));
         }
     }
+    methods.extend(crate::agent::custom_providers::picker_methods());
 
     BuiltAuthMethods {
         methods,
@@ -189,6 +191,8 @@ pub enum AuthMethodKind {
     KimiCode,
     /// Registry API-key platform login (method id = the platform id).
     ApiKeyPlatform(kigi_models::PlatformId),
+    /// A saved custom provider's login (method id = `custom:<name>`).
+    CustomProvider,
     /// Generic device-code OAuth platform login (method id = the platform id,
     /// e.g. `xai-grok`). Interactive, like Kimi Code.
     OAuthPlatform(kigi_models::PlatformId),
@@ -201,6 +205,9 @@ impl AuthMethodKind {
             XAI_API_KEY_METHOD_ID => Self::XaiApiKey,
             CACHED_TOKEN_AUTH_METHOD_ID => Self::CachedToken,
             KIMI_CODE_METHOD_ID => Self::KimiCode,
+            other if crate::agent::custom_providers::login_provider_name(other).is_some() => {
+                Self::CustomProvider
+            }
             other => match kigi_models::PlatformId::parse(other) {
                 Some(p) if p.oauth().is_some() => Self::OAuthPlatform(p),
                 Some(p) if !p.uses_oauth() => Self::ApiKeyPlatform(p),
@@ -213,7 +220,10 @@ impl AuthMethodKind {
     /// The registry platform methods qualify — they validate a configured
     /// platform key and then behave exactly like an external-API-key session.
     pub fn is_api_key(self) -> bool {
-        matches!(self, Self::XaiApiKey | Self::ApiKeyPlatform(_))
+        matches!(
+            self,
+            Self::XaiApiKey | Self::ApiKeyPlatform(_) | Self::CustomProvider
+        )
     }
 
     /// `true` for session-based methods (cached_token, interactive login).
@@ -589,6 +599,23 @@ mod tests {
         );
     }
 
+    /// `custom:<name>` is an API-key login; the picker rows are not loginable.
+    #[test]
+    fn custom_provider_method_ids_classify_as_api_key() {
+        let kind = AuthMethodKind::from_id(&acp::AuthMethodId::new("custom:my-proxy"));
+        assert_eq!(kind, AuthMethodKind::CustomProvider);
+        assert!(kind.is_api_key());
+        assert!(!kind.is_session_based());
+        assert!(!kind.needs_interactive_login());
+        for picker in ["custom-openai", "custom-anthropic"] {
+            assert_eq!(
+                AuthMethodKind::from_id(&acp::AuthMethodId::new(picker)),
+                AuthMethodKind::Unknown,
+                "{picker} only opens the TUI flow; it cannot authenticate"
+            );
+        }
+    }
+
     /// Classifier matrix for all auth method variants.
     #[test]
     fn auth_method_kind_classifier_matrix() {
@@ -896,7 +923,9 @@ mod tests {
                 "xiaomi",
                 "xiaomi-token-plan-cn",
                 "minimax",
-                "minimax-cn"
+                "minimax-cn",
+                "custom-openai",
+                "custom-anthropic"
             ]
         );
         assert_eq!(default_id(&built), Some(XAI_API_KEY_METHOD_ID));
@@ -948,7 +977,9 @@ mod tests {
                 "xiaomi",
                 "xiaomi-token-plan-cn",
                 "minimax",
-                "minimax-cn"
+                "minimax-cn",
+                "custom-openai",
+                "custom-anthropic"
             ]
         );
         assert_eq!(default_id(&built), Some(CACHED_TOKEN_AUTH_METHOD_ID));
@@ -993,7 +1024,9 @@ mod tests {
                 "xiaomi",
                 "xiaomi-token-plan-cn",
                 "minimax",
-                "minimax-cn"
+                "minimax-cn",
+                "custom-openai",
+                "custom-anthropic"
             ]
         );
         assert_eq!(default_id(&built), Some(CACHED_TOKEN_AUTH_METHOD_ID));
@@ -1041,7 +1074,9 @@ mod tests {
                 "xiaomi",
                 "xiaomi-token-plan-cn",
                 "minimax",
-                "minimax-cn"
+                "minimax-cn",
+                "custom-openai",
+                "custom-anthropic"
             ]
         );
         assert_eq!(default_id(&built), None);

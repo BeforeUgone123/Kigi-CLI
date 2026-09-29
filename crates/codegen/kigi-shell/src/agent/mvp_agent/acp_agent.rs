@@ -557,6 +557,11 @@ impl acp::Agent for MvpAgent {
                 .oauth_platform()
                 {
                     self.authenticate_oauth_platform(platform, arguments).await
+                } else if let Some(name) = crate::agent::custom_providers::login_provider_name(
+                    arguments.method_id.0.as_ref(),
+                ) {
+                    self.authenticate_custom_provider(name, arguments.method_id.clone())
+                        .await
                 } else if let Some(platform) =
                     auth_method::platform_for_method_id(&arguments.method_id)
                 {

@@ -461,6 +461,7 @@ pub struct WelcomeRenderParams<'a> {
     pub auth_methods: &'a [acp::AuthMethod],
     pub login_label: Option<&'a str>,
     pub auth_code_input: &'a str,
+    pub custom_entry: &'a crate::app::custom_entry::CustomEntryDraft,
     pub clipboard_copied: bool,
     pub show_raw_url: bool,
     pub tip: Option<&'a str>,
@@ -603,6 +604,7 @@ pub fn render_welcome(
                 auth_url.as_deref(),
                 *mode,
                 params.auth_code_input,
+                params.custom_entry,
                 params.clipboard_copied,
                 params.show_raw_url,
             );
@@ -1176,6 +1178,7 @@ fn render_welcome_authenticating(
     auth_url: Option<&str>,
     mode: AuthMode,
     auth_code_input: &str,
+    custom_entry: &crate::app::custom_entry::CustomEntryDraft,
     clipboard_copied: bool,
     show_raw_url: bool,
 ) -> (Option<Rect>, Option<Rect>) {
@@ -1270,6 +1273,7 @@ fn render_welcome_authenticating(
                 theme,
                 auth_code_input,
                 "Paste your token here...",
+                true,
             );
 
             // Hints
@@ -1290,81 +1294,45 @@ fn render_welcome_authenticating(
         }
 
         AuthMode::ApiKeyEntry(target) => {
-            // Platform API-key paste box: instruction + input + hints. No
-            // auth-URL machinery — the key comes from the platform console.
-            let h_pad: u16 = content_area.width / 6;
-            let inner_width = content_area.width.saturating_sub(h_pad * 2).max(1);
+            // Platform API-key paste box: the key comes from the platform console.
             let instruction = format!(
                 "Paste your {} API key (from {})",
                 target.vendor(),
                 target.console_host()
             );
-            let msg_height = (instruction.len() as u16).div_ceil(inner_width);
-            let [_, logo_area, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
-                Constraint::Length(top_pad),
-                Constraint::Length(logo_line_count),
-                // gap
-                Constraint::Length(1),
-                // instruction
-                Constraint::Length(msg_height),
-                // gap
-                Constraint::Min(1),
-                // prompt box
-                Constraint::Length(5),
-                // gap
-                Constraint::Length(1),
-                // hints
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .areas(content_area);
-
-            render_logo(logo_area, buf, theme, content_area.height);
-
-            let msg = Line::from(Span::styled(
-                instruction,
-                Style::default().fg(theme.gray_bright),
-            ))
-            .alignment(Alignment::Center);
-            Paragraph::new(msg)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::horizontal(h_pad)))
-                .render(msg_area, buf);
-
-            let [_, prompt_centered, _] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(content_area.width),
-                Constraint::Min(0),
-            ])
-            .flex(Flex::Center)
-            .areas(prompt_area);
-            render_auth_input_box(
-                prompt_centered,
+            render_entry_box(
+                content_area,
                 buf,
                 theme,
-                auth_code_input,
-                "Paste your API key here...",
+                top_pad,
+                logo_line_count,
+                &EntryBox {
+                    instruction: &instruction,
+                    error: None,
+                    input: auth_code_input,
+                    placeholder: "Paste your API key here...",
+                    masked: true,
+                },
             );
+            (None, None)
+        }
 
-            let hints = Line::from(vec![
-                Span::styled(
-                    "enter",
-                    Style::default()
-                        .fg(theme.accent_user)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  submit    ", Style::default().fg(theme.gray)),
-                Span::styled(
-                    "esc",
-                    Style::default()
-                        .fg(theme.accent_user)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  back", Style::default().fg(theme.gray)),
-            ])
-            .alignment(Alignment::Center);
-            Paragraph::new(hints).render(hint_area, buf);
-
+        AuthMode::CustomProviderEntry(step) => {
+            let instruction = custom_entry.instruction(step);
+            render_entry_box(
+                content_area,
+                buf,
+                theme,
+                top_pad,
+                logo_line_count,
+                &EntryBox {
+                    instruction: &instruction,
+                    error: custom_entry.error.as_deref(),
+                    input: auth_code_input,
+                    placeholder: step.placeholder(),
+                    masked: step.masks_input(),
+                },
+            );
             (None, None)
         }
 
@@ -1971,12 +1939,109 @@ pub(crate) fn render_session_picker(
 }
 
 /// Render the auth token input box (loopback mode).
+/// One text field under the logo: instruction, optional error, input box, hints.
+struct EntryBox<'a> {
+    instruction: &'a str,
+    error: Option<&'a str>,
+    input: &'a str,
+    placeholder: &'a str,
+    masked: bool,
+}
+
+fn render_entry_box(
+    content_area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    top_pad: u16,
+    logo_line_count: u16,
+    entry: &EntryBox<'_>,
+) {
+    let h_pad: u16 = content_area.width / 6;
+    let inner_width = content_area.width.saturating_sub(h_pad * 2).max(1);
+    let rows = |text: &str| (text.len() as u16).div_ceil(inner_width);
+    let msg_height = rows(entry.instruction) + entry.error.map_or(0, rows);
+    let [_, logo_area, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
+        Constraint::Length(top_pad),
+        Constraint::Length(logo_line_count),
+        // gap
+        Constraint::Length(1),
+        // instruction
+        Constraint::Length(msg_height),
+        // gap
+        Constraint::Min(1),
+        // prompt box
+        Constraint::Length(5),
+        // gap
+        Constraint::Length(1),
+        // hints
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(content_area);
+
+    render_logo(logo_area, buf, theme, content_area.height);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            entry.instruction,
+            Style::default().fg(theme.gray_bright),
+        ))
+        .alignment(Alignment::Center),
+    ];
+    if let Some(error) = entry.error {
+        lines.push(
+            Line::from(Span::styled(error, Style::default().fg(theme.warning)))
+                .alignment(Alignment::Center),
+        );
+    }
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().padding(Padding::horizontal(h_pad)))
+        .render(msg_area, buf);
+
+    let [_, prompt_centered, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(content_area.width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(prompt_area);
+    render_auth_input_box(
+        prompt_centered,
+        buf,
+        theme,
+        entry.input,
+        entry.placeholder,
+        entry.masked,
+    );
+
+    let hints = Line::from(vec![
+        Span::styled(
+            "enter",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  submit    ", Style::default().fg(theme.gray)),
+        Span::styled(
+            "esc",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  back", Style::default().fg(theme.gray)),
+    ])
+    .alignment(Alignment::Center);
+    Paragraph::new(hints).render(hint_area, buf);
+}
+
 fn render_auth_input_box(
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
     input: &str,
     placeholder: &str,
+    masked: bool,
 ) {
     let prompt_block = Block::default()
         .borders(Borders::ALL)
@@ -1993,8 +2058,10 @@ fn render_auth_input_box(
     if inner.height > 0 && inner.width > 2 {
         let display = if input.is_empty() {
             placeholder.to_string()
-        } else {
+        } else if masked {
             mask_auth_token_for_display(input)
+        } else {
+            input.to_string()
         };
 
         let style = if input.is_empty() {
@@ -2078,6 +2145,8 @@ fn mask_auth_token_for_display(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static EMPTY_CUSTOM_ENTRY: crate::app::custom_entry::CustomEntryDraft =
+        crate::app::custom_entry::CustomEntryDraft::new();
     use crate::app::app_view::SessionPickerEntry;
     use crate::views::picker::PickerState;
     use crate::views::session_picker::{build_grouped_picker_entries, build_session_entry_data};
@@ -2127,6 +2196,7 @@ mod tests {
             auth_methods: &[],
             login_label: None,
             auth_code_input: "",
+            custom_entry: &EMPTY_CUSTOM_ENTRY,
             clipboard_copied: false,
             show_raw_url: false,
             tip: None,
@@ -2325,6 +2395,71 @@ mod tests {
 
     /// The Moonshot API-key entry arm renders the platform copy, the paste
     /// box, and the esc-back hint — and no OAuth-URL affordances.
+    fn render_custom_entry(
+        step: crate::app::custom_entry::CustomEntryStep,
+        draft: &crate::app::custom_entry::CustomEntryDraft,
+        input: &str,
+    ) -> String {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_welcome_authenticating(
+            area,
+            &mut buf,
+            &Theme::current(),
+            logo_line_count(area.height),
+            None,
+            AuthMode::CustomProviderEntry(step),
+            input,
+            draft,
+            false,
+            false,
+        );
+        buffer_text(&buf)
+    }
+
+    /// The URL and name steps show typed text; only the key step masks it.
+    #[test]
+    fn custom_entry_arm_masks_only_the_key() {
+        use crate::app::custom_entry::{CustomEntryDraft, CustomEntryField, CustomEntryStep};
+        use kigi_shell::models::custom::CustomApi;
+        let step = |field| CustomEntryStep {
+            api: CustomApi::OpenAi,
+            field,
+        };
+        let draft = CustomEntryDraft::new();
+
+        let url = render_custom_entry(
+            step(CustomEntryField::BaseUrl),
+            &draft,
+            "https://very-long-host.example/v1",
+        );
+        assert!(url.contains("https://very-long-host.example/v1"), "{url}");
+        assert!(url.contains("OpenAI compatible"), "{url}");
+
+        let key = render_custom_entry(step(CustomEntryField::Key), &draft, "sk-abcdefghijklmnop");
+        assert!(
+            !key.contains("sk-abcdefghij"),
+            "the key prefix must stay hidden: {key}"
+        );
+        assert!(key.contains("mnop"), "{key}");
+
+        let empty = render_custom_entry(step(CustomEntryField::Name), &draft, "");
+        assert!(empty.contains("provider name"), "{empty}");
+    }
+
+    /// A refusal shows under the instruction so the user sees what to fix.
+    #[test]
+    fn custom_entry_arm_shows_the_refusal() {
+        use crate::app::custom_entry::{CustomEntryDraft, CustomEntryStep};
+        use kigi_shell::models::custom::CustomApi;
+        let step = CustomEntryStep::first(CustomApi::Anthropic);
+        let mut draft = CustomEntryDraft::new();
+        draft.submit(step, "host.example");
+        let text = render_custom_entry(step, &draft, "host.example");
+        assert!(text.contains("Anthropic compatible"), "{text}");
+        assert!(text.contains("must start with http"), "{text}");
+    }
+
     #[test]
     fn api_key_entry_arm_shows_platform_copy_and_paste_box() {
         let area = Rect::new(0, 0, 80, 40);
@@ -2343,6 +2478,7 @@ mod tests {
             )),
             // auth_code_input
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             // clipboard_copied
             false,
             // show_raw_url
@@ -3010,6 +3146,7 @@ mod tests {
             AuthMode::Device,
             // auth_code_input — unused in device mode
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             // clipboard_copied
             false,
             // show_raw_url
@@ -3066,6 +3203,7 @@ mod tests {
             Some(url),
             AuthMode::Device,
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             false,
             // show_raw_url
             true,
@@ -3093,6 +3231,7 @@ mod tests {
             Some(url),
             AuthMode::Device,
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             false,
             // show_raw_url
             true,
@@ -3131,6 +3270,7 @@ mod tests {
             Some(url),
             AuthMode::Device,
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             false,
             // show_raw_url
             true,
@@ -3172,6 +3312,7 @@ mod tests {
             AuthMode::Command,
             // auth_code_input — unused
             "",
+            &crate::app::custom_entry::CustomEntryDraft::new(),
             // clipboard_copied
             false,
             // show_raw_url

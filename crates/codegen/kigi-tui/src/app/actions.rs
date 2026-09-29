@@ -570,6 +570,10 @@ pub enum Action {
     /// under the platform-id scope, then authenticate with the platform's
     /// method id. The key must never be logged.
     SubmitPlatformApiKey(String),
+    /// A custom provider row was picked: start the URL, name, key steps.
+    BeginCustomProviderEntry(kigi_shell::models::custom::CustomApi),
+    /// Enter in a custom provider step, with the trimmed input.
+    SubmitCustomProviderInput(String),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
@@ -1612,6 +1616,13 @@ pub enum Effect {
     PersistPlatformApiKeyAndAuthenticate {
         request_seq: u64,
         target: crate::app::app_view::PlatformLogin,
+        key: String,
+    },
+    /// Save a custom provider (config.toml and auth.json), then send
+    /// AuthenticateRequest with `custom:<name>`. SECURITY: never log the key.
+    PersistCustomProviderAndAuthenticate {
+        request_seq: u64,
+        provider: kigi_shell::models::custom::CustomProvider,
         key: String,
     },
     /// Fetch MCP server list from the shell (kigi/mcp/list).

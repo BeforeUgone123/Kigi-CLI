@@ -1911,6 +1911,35 @@ pub(crate) fn execute(
                 });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
         }
+        Effect::PersistCustomProviderAndAuthenticate {
+            request_seq,
+            provider,
+            key,
+        } => {
+            let tx = acp_tx.clone();
+            let abort_handle = tasks.spawn(async move {
+                // Persist first so authenticate finds the definition and key.
+                if let Err(e) =
+                    kigi_shell::agent::custom_providers::save_custom_provider(&provider, &key)
+                        .await
+                {
+                    let error = format!("Couldn't save the provider: {e:#}");
+                    ulog::error(
+                        "custom provider persist failed",
+                        None,
+                        Some(serde_json::json!({ "error" : & error })),
+                    );
+                    return TaskResult::AuthFailed {
+                        request_seq,
+                        error,
+                    };
+                }
+                let method_id =
+                    kigi_shell::agent::custom_providers::login_method_id(&provider.name);
+                send_authenticate(&tx, request_seq, method_id, false, false).await
+            });
+            meta.auth_abort_handle = Some((request_seq, abort_handle));
+        }
         Effect::SubmitAuthCode { request_seq, code } => {
             let tx = acp_tx.clone();
             tasks
