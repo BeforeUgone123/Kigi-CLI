@@ -260,6 +260,26 @@ impl AgentView {
         }
         self.prompt.set_text("");
     }
+    fn cancel_plan_comment(&mut self) -> InputOutcome {
+        let stashed = if let Some(ref mut pav) = self.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.editing_comment_id = None;
+            pav.commenting_range = None;
+            pav.stashed_feedback_prompt.take()
+        } else {
+            None
+        };
+        if let Some(stashed) = stashed {
+            self.prompt.restore(stashed);
+        } else {
+            self.prompt.set_text("");
+        }
+        InputOutcome::Changed
+    }
+    /// Ctrl+C on an empty draft; the first one clears it.
+    fn ctrl_c_cancels_empty_draft(&self, key: &KeyEvent) -> bool {
+        crate::key!('c', CONTROL).matches(key) && self.prompt.text().is_empty()
+    }
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let is_commenting = self
             .plan_approval_view
@@ -297,25 +317,15 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if is_commenting {
-                let stashed = if let Some(ref mut pav) = self.plan_approval_view {
-                    pav.focus = PlanApprovalFocus::Preview;
-                    pav.editing_comment_id = None;
-                    pav.commenting_range = None;
-                    pav.stashed_feedback_prompt.take()
-                } else {
-                    None
-                };
-                if let Some(stashed) = stashed {
-                    self.prompt.restore(stashed);
-                } else {
-                    self.prompt.set_text("");
-                }
-                return InputOutcome::Changed;
+                return self.cancel_plan_comment();
             }
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Preview;
             }
             return InputOutcome::Changed;
+        }
+        if is_commenting && self.ctrl_c_cancels_empty_draft(key) {
+            return self.cancel_plan_comment();
         }
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
@@ -567,6 +577,9 @@ impl AgentView {
                 self.prompt.file_search.clear_context();
                 return InputOutcome::Changed;
             }
+            return self.cancel_casual_plan_commenting();
+        }
+        if self.ctrl_c_cancels_empty_draft(key) {
             return self.cancel_casual_plan_commenting();
         }
         match self.prompt.route_enter(key) {
@@ -821,5 +834,54 @@ mod plan_chip_tests {
             a_on.handle_scrollback_key(&down, &registry),
             InputOutcome::Action(Action::SelectNext)
         ));
+    }
+}
+#[cfg(test)]
+mod plan_comment_cancel_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+    fn stash_of(text: &str) -> crate::views::prompt_widget::StashedPrompt {
+        let mut stash = crate::views::prompt_widget::StashedPrompt::default();
+        stash.text = text.to_owned();
+        stash
+    }
+    #[test]
+    fn second_ctrl_c_cancels_a_plan_approval_comment() {
+        let mut agent = make_agent();
+        let mut pav =
+            crate::app::agent_view::paste::paste_key_tests::make_plan_approval_view_state();
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.commenting_range = Some(0..1);
+        pav.stashed_feedback_prompt = Some(stash_of("freeform notes"));
+        agent.plan_approval_view = Some(pav);
+        agent.prompt.set_text("half a comment");
+        let _ = agent.handle_plan_feedback_key(&ctrl_c());
+        assert_eq!(agent.prompt.text(), "");
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Commenting),
+            "the first Ctrl+C only clears the draft"
+        );
+        let _ = agent.handle_plan_feedback_key(&ctrl_c());
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+        assert!(pav.commenting_range.is_none());
+        assert_eq!(agent.prompt.text(), "freeform notes");
+    }
+    #[test]
+    fn second_ctrl_c_cancels_a_casual_plan_comment() {
+        let mut agent = make_agent();
+        agent.casual_commenting_range = Some(0..1);
+        agent.casual_stashed_prompt = Some(stash_of("earlier draft"));
+        agent.prompt.set_text("half a comment");
+        let _ = agent.handle_casual_plan_feedback_key(&ctrl_c());
+        assert_eq!(agent.prompt.text(), "");
+        assert!(agent.casual_commenting_range.is_some());
+        let _ = agent.handle_casual_plan_feedback_key(&ctrl_c());
+        assert!(agent.casual_commenting_range.is_none());
+        assert_eq!(agent.prompt.text(), "earlier draft");
     }
 }
