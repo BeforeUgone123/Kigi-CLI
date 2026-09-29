@@ -322,6 +322,10 @@ impl ListItem for QueuedPromptEntry {
     fn search_text(&self) -> &str {
         &self.text
     }
+
+    fn copy_text(&self) -> String {
+        self.text.clone()
+    }
 }
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -997,6 +1001,13 @@ mod tests {
 
     fn local_prompt(id: u64, text: &str) -> QueuedPrompt {
         QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+    }
+
+    #[test]
+    fn y_copies_the_full_multiline_prompt_not_the_display_row() {
+        let text = "first line of a long prompt\nsecond line\nthird line";
+        let entry = QueuedPromptEntry::new(&local_prompt(1, text), 1);
+        assert_eq!(ListItem::copy_text(&entry), text);
     }
 
     #[test]

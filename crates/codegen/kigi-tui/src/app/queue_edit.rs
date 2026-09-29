@@ -106,8 +106,16 @@ impl AgentView {
                 return Some(false);
             }
             // Clean edit — silently exit editing mode.
+            // The exit cleared the overlay flip; restore it.
             self.exit_editing_mode();
-            self.active_pane = target;
+            self.set_active_pane(target, true);
+            match target {
+                AgentPane::Queue => self.queue.overlay.focused = true,
+                AgentPane::Todo => self.todo.overlay.focused = true,
+                AgentPane::Tasks => self.tasks.overlay.focused = true,
+                AgentPane::Catalog => self.catalog.overlay.focused = true,
+                _ => {}
+            }
             return Some(true);
         }
         None
@@ -487,7 +495,7 @@ impl AgentView {
         self.show_toast("Queued prompt is no longer in the queue");
     }
 
-    /// Exit editing mode: restore stashed text, clear mode, focus queue pane.
+    /// Exit editing mode: restore stashed text, clear mode, focus the composer.
     /// No-op unless `EditingQueued`.
     ///
     /// Always resets `prompt_input_mode` to `Normal` so it doesn't leak
@@ -513,13 +521,8 @@ impl AgentView {
         if matches!(self.active_modal, Some(ActiveModal::EditConfirm { .. })) {
             self.active_modal = None;
         }
-        // Return focus to queue pane (if still visible).
-        // Force=true: we just cleared editing mode, no lock to check.
-        if self.queue.is_visible() {
-            self.set_active_pane(AgentPane::Queue, true);
-        } else {
-            self.set_active_pane(AgentPane::Scrollback, true);
-        }
+        // Queue focus would make the next Enter re-open the edit.
+        self.set_active_pane(AgentPane::Prompt, true);
     }
 }
 
@@ -552,6 +555,39 @@ mod tests {
 
     fn enter_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn enter_edit_local_row() -> AgentView {
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[1]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        agent
+    }
+
+    #[test]
+    fn save_returns_focus_to_the_composer() {
+        let mut agent = enter_edit_local_row();
+        agent.prompt.set_text("local one EDITED");
+        let _ = agent.handle_prompt_key_for_test(&enter_key());
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn discard_returns_focus_to_the_composer() {
+        let mut agent = enter_edit_local_row();
+        let _ = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn toggle_queue_pane_with_clean_edit_lands_focused_on_the_queue() {
+        let mut agent = enter_edit_local_row();
+        agent.toggle_queue_pane();
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(agent.active_pane, AgentPane::Queue);
+        assert!(agent.queue.overlay.focused);
     }
 
     fn attach_image_to_local_row(agent: &mut AgentView) {
