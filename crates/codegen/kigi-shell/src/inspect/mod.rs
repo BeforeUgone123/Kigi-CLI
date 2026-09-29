@@ -1605,6 +1605,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn describe_requirements_file_flags_invalid_version_overrides_as_parse_error() {
         // Valid TOML but invalid `[[version_overrides]]` is rejected by the real
         // loader, so it must read "parse error", not "empty".
