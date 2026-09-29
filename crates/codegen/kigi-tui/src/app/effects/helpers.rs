@@ -1103,6 +1103,27 @@ pub(super) fn parse_usage_response(
         .map(|usage| usage.rows)
         .map_err(|e| format!("Parse error: {e}"))
 }
+/// `Some` ends a clipboard probe before any attachment read.
+pub(super) fn bracketed_origin_verdict(
+    probe_bracketed: bool,
+    payload: Option<&str>,
+) -> Option<crate::app::actions::ProbedAttachment> {
+    use crate::app::actions::ProbedAttachment;
+    if !probe_bracketed {
+        return None;
+    }
+    match crate::clipboard::bracketed_payload_came_from_clipboard_result(payload.unwrap_or("")) {
+        Ok(true) => None,
+        Ok(false) => {
+            tracing::debug!("bracketed paste differs from the clipboard; no attachment probe");
+            Some(ProbedAttachment::ProbeDropped)
+        }
+        Err(_) => {
+            tracing::debug!("clipboard unreadable for a bracketed paste; no attachment probe");
+            Some(ProbedAttachment::ProbeDropped)
+        }
+    }
+}
 /// A blocking flock on the shared, possibly-network `~/.kigi` lock must never
 /// stall the event-loop thread (and would hang exit on `/quit`); the registry
 /// is best-effort, so skip on contention.

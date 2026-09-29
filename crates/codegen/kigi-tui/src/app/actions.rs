@@ -1258,7 +1258,7 @@ pub enum ProbedAttachment {
     PersistFailed(String),
     /// The pasteboard probe completed normally without raster data.
     NoRaster,
-    /// The attachment result was intentionally discarded because its baseline went stale.
+    /// The attachment result was discarded: stale baseline, or the paste was not the clipboard.
     ProbeDropped,
     /// The attachment probe task failed or timed out.
     ProbeFailed,

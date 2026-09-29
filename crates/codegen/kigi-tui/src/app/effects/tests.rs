@@ -1664,3 +1664,37 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
+
+fn origin_verdict_with_clipboard(
+    clipboard: Option<&str>,
+    read_failed: bool,
+    probe_bracketed: bool,
+    payload: &str,
+) -> Option<crate::app::actions::ProbedAttachment> {
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: clipboard.map(str::to_owned),
+        text_read_failed: read_failed,
+        ..Default::default()
+    });
+    let verdict = bracketed_origin_verdict(probe_bracketed, Some(payload));
+    crate::clipboard::clear_clipboard_probe_hook();
+    verdict
+}
+#[test]
+fn bracketed_paste_that_is_not_the_clipboard_drops_the_probe() {
+    let verdict = origin_verdict_with_clipboard(Some("copied text"), false, true, "typed by ime");
+    assert!(matches!(verdict, Some(crate::app::actions::ProbedAttachment::ProbeDropped)));
+}
+#[test]
+fn bracketed_paste_matching_the_clipboard_keeps_probing() {
+    assert!(origin_verdict_with_clipboard(Some("copied text"), false, true, "copied text").is_none());
+}
+#[test]
+fn unreadable_clipboard_drops_a_bracketed_probe_without_an_error() {
+    let verdict = origin_verdict_with_clipboard(None, true, true, "anything");
+    assert!(matches!(verdict, Some(crate::app::actions::ProbedAttachment::ProbeDropped)));
+}
+#[test]
+fn clipboard_key_probe_skips_the_origin_check() {
+    assert!(origin_verdict_with_clipboard(Some("copied text"), false, false, "other").is_none());
+}

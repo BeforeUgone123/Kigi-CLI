@@ -52,24 +52,6 @@ fn brand_otty_from_term_program() {
 }
 
 #[test]
-fn otty_delivers_ime_as_bracketed_paste_only() {
-    assert!(TerminalName::Otty.delivers_ime_as_bracketed_paste());
-    for brand in [
-        TerminalName::AppleTerminal,
-        TerminalName::Ghostty,
-        TerminalName::Iterm2,
-        TerminalName::Unknown,
-        TerminalName::WezTerm,
-        TerminalName::Kitty,
-    ] {
-        assert!(
-            !brand.delivers_ime_as_bracketed_paste(),
-            "{brand:?} must not gate IME bracketed-paste origin"
-        );
-    }
-}
-
-#[test]
 fn otty_is_capability_unclassified_like_unknown() {
     assert!(TerminalName::Otty.is_capability_unclassified());
     assert!(TerminalName::Unknown.is_capability_unclassified());

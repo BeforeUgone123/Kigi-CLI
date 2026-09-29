@@ -1637,18 +1637,11 @@ pub(crate) fn execute(
                         {
                             return (ProbedAttachment::ProbeDropped, None);
                         }
-                        if probe_bracketed
-                            && crate::terminal::terminal_context()
-                                .brand
-                                .delivers_ime_as_bracketed_paste()
-                        {
-                            match crate::clipboard::bracketed_payload_came_from_clipboard_result(
-                                probe_text.as_deref().unwrap_or(""),
-                            ) {
-                                Ok(true) => {}
-                                Ok(false) => return (ProbedAttachment::ProbeDropped, None),
-                                Err(_) => return (ProbedAttachment::ProbeFailed, None),
-                            }
+                        if let Some(verdict) = helpers::bracketed_origin_verdict(
+                            probe_bracketed,
+                            probe_text.as_deref(),
+                        ) {
+                            return (verdict, None);
                         }
                         let (image_data, file_urls) = match crate::clipboard::system_clipboard_probe_attachments(
                             probe_text.as_deref(),

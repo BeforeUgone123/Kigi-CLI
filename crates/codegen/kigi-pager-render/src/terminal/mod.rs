@@ -189,11 +189,6 @@ impl TerminalName {
                 | Self::Zed
         )
     }
-
-    /// Only Otty is known to wrap macOS IME commits in bracketed paste.
-    pub fn delivers_ime_as_bracketed_paste(self) -> bool {
-        matches!(self, Self::Otty)
-    }
 }
 
 impl TerminalContext {
