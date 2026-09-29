@@ -178,6 +178,9 @@ pub struct EndpointsConfig {
     /// Read by `load_gcs_service_account_key_sync()`. Declared for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcs_service_account_key: Option<String>,
+    /// Base URLs of declared custom providers; derived, never serialized.
+    #[serde(skip)]
+    pub custom_provider_bases: Vec<String>,
 }
 /// A blank or whitespace-only override counts as unset. Single source of truth
 /// for the "empty value = not configured" rule shared by the endpoint resolvers.
@@ -210,7 +213,13 @@ impl EndpointsConfig {
         if let Some(endpoints) = config.get("endpoints") {
             crate::config::deep_merge_toml(&mut base, endpoints);
         }
-        base.try_into().unwrap_or_default()
+        let mut endpoints: Self = base.try_into().unwrap_or_default();
+        if let Some(platforms) = config.get("platforms").cloned()
+            && let Ok(platforms) = platforms.try_into::<PlatformsConfig>()
+        {
+            endpoints.custom_provider_bases = super::custom_providers::bases(&platforms);
+        }
+        endpoints
     }
     /// The subscription proxy base URL through which all auxiliary services (and
     /// OAuth/session inference) resolve: explicit `coding_api_base_url`, else
@@ -265,6 +274,7 @@ impl Default for EndpointsConfig {
             managed_config_url: env_string("KIGI_MANAGED_CONFIG_URL"),
             management_api_key: None,
             gcs_service_account_key: None,
+            custom_provider_bases: Vec::new(),
         }
     }
 }
@@ -771,8 +781,11 @@ impl PlatformsConfig {
     /// registry platform, so a typo like `moonshot_cn` fails loudly instead of
     /// silently never matching. Key values are not logged.
     pub fn warn_unknown_platforms(&self) {
-        for id in self.entries.keys() {
-            if kigi_models::PlatformId::parse(id).is_none() {
+        super::custom_providers::warn_invalid_declarations(self);
+        for (id, entry) in &self.entries {
+            if kigi_models::PlatformId::parse(id).is_none()
+                && !super::custom_providers::is_declared(entry)
+            {
                 tracing::warn!(
                     platform = %id,
                     known = ?kigi_models::PlatformId::ALL
@@ -793,6 +806,12 @@ pub struct PlatformCredentialConfig {
     /// API key for this platform. NEVER logged; never re-serialized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// With `api`, declares a custom provider outside the registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// `"openai"` or `"anthropic"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
 }
 
 /// Resolve the API key for an API-key registry platform with injected env
@@ -1582,6 +1601,7 @@ impl Config {
         config.config_models = config_models;
         config.model_override_warnings = model_override_warnings;
         config.platforms.warn_unknown_platforms();
+        config.endpoints.custom_provider_bases = super::custom_providers::bases(&config.platforms);
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
@@ -2569,6 +2589,13 @@ pub(crate) fn resolve_model_list(
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
+    let prefetched = prefetched.map(|models| {
+        if cfg.endpoints.has_custom_endpoint() {
+            models
+        } else {
+            crate::agent::custom_providers::drop_orphans(models, platform_keys.custom())
+        }
+    });
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
@@ -2676,6 +2703,7 @@ pub(crate) fn resolve_model_list(
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
     apply_platform_credentials(&mut resolved, &cfg.platforms, platform_keys);
+    crate::agent::custom_providers::stamp_credentials(&mut resolved, platform_keys.custom());
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
@@ -9671,6 +9699,31 @@ default = "kigi-4.5"
         assert!(
             !entry.visible_for_auth(false),
             "non-BYOK config overlay must preserve bundled supported_in_api=false"
+        );
+    }
+    /// Custom provider bases reach `EndpointsConfig` from both entry points.
+    #[test]
+    fn declared_custom_provider_bases_reach_the_endpoints() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [platforms.proxy]
+            base_url = "http://localhost:11434/v1/"
+            api = "openai"
+            [platforms.broken]
+            api = "openai"
+            [platforms.moonshot-cn]
+            api_key = "sk-cn"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert_eq!(
+            cfg.endpoints.custom_provider_bases,
+            vec!["http://localhost:11434/v1".to_owned()]
+        );
+        assert_eq!(
+            EndpointsConfig::from_config_value(&raw).custom_provider_bases,
+            vec!["http://localhost:11434/v1".to_owned()]
         );
     }
     /// PRD F2: a `[platforms.<id>].api_key` from config.toml is stamped onto

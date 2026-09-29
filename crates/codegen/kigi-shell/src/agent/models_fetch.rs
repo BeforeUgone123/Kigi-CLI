@@ -114,6 +114,12 @@ pub(crate) fn models_fetch_origin(
             let parts: Vec<String> = enabled_platforms(has_oauth, oauth_tokens, platform_keys)
                 .into_iter()
                 .map(|p| format!("{}={}", p.as_str(), platform_models_url(p, endpoints)))
+                .chain(
+                    platform_keys
+                        .custom()
+                        .iter()
+                        .map(|c| format!("{}={}", c.provider.name, c.provider.models_url())),
+                )
                 .collect();
             format!("platforms[{}]", parts.join(";"))
         }
@@ -265,7 +271,7 @@ fn fetch_platform_models_blocking(
     platform_keys: &crate::agent::models::PlatformApiKeys,
 ) -> Result<FetchModelsResult, BackendError> {
     let enabled = enabled_platforms(auth.is_some(), oauth_tokens, platform_keys);
-    if enabled.is_empty() {
+    if enabled.is_empty() && platform_keys.custom().is_empty() {
         return Err(BackendError::Auth(
             "No platform credentials: log in with `kigi login`, paste a platform API key in \
              the login screen (stored in ~/.kigi/auth.json), or set a platform env var such \
@@ -324,6 +330,28 @@ fn fetch_platform_models_blocking(
                     platform = platform.as_str(),
                     error = %e,
                     "platform models fetch failed"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+
+    for credentialed in platform_keys.custom() {
+        match crate::agent::custom_providers::fetch_models_blocking(credentialed) {
+            Ok(custom_models) => {
+                tracing::info!(
+                    provider = %credentialed.provider.name,
+                    count = custom_models.len(),
+                    "custom provider models fetch succeeded"
+                );
+                successes += 1;
+                models.extend(custom_models);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = %credentialed.provider.name,
+                    error = %e,
+                    "custom provider models fetch failed"
                 );
                 last_error = Some(e);
             }
@@ -614,6 +642,37 @@ pub(crate) fn platform_wire_model_to_entry(
     wire: kigi_models::WireModel,
     base_url: &str,
 ) -> crate::agent::config::ModelEntryConfig {
+    let env_key = (!platform.uses_oauth())
+        .then(|| crate::agent::config::EnvKeys::new(platform.api_key_env_names().iter().copied()));
+    // `supported_in_api: false` hides a model unless the PRIMARY session is
+    // an OAuth session (`ModelInfo::visible_for_auth`). Only `kimi-code` rides
+    // that primary session, so only it may be gated on it. Every other OAuth
+    // platform (claude-pro-max, openai-codex, github-copilot, xai-grok) carries
+    // its OWN pooled credential and its models only enter the catalog once THAT
+    // provider is signed in — gating them on the Kimi session would hide every
+    // model from a user who signed in with only a Claude/ChatGPT/Copilot/Grok
+    // subscription.
+    wire_model_to_entry(
+        platform.managed_model_key(&wire.id),
+        platform.wire_api(),
+        platform.key_header(),
+        env_key,
+        platform != kigi_models::PlatformId::KimiCode,
+        wire,
+        base_url,
+    )
+}
+
+/// Wire-to-catalog mapping shared by platforms and custom providers.
+pub(crate) fn wire_model_to_entry(
+    id: String,
+    wire_api: kigi_models::PlatformWireApi,
+    key_header: kigi_models::PlatformKeyHeader,
+    env_key: Option<crate::agent::config::EnvKeys>,
+    supported_in_api: bool,
+    wire: kigi_models::WireModel,
+    base_url: &str,
+) -> crate::agent::config::ModelEntryConfig {
     let capabilities = wire.capabilities();
     // Selectable thinking levels (live wire `think_efforts`, e.g. K3's
     // low/high/max). `support: false` or absence both mean "no levels".
@@ -626,21 +685,19 @@ pub(crate) fn platform_wire_model_to_entry(
         );
         std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).expect("non-zero")
     });
-    let env_key = (!platform.uses_oauth())
-        .then(|| crate::agent::config::EnvKeys::new(platform.api_key_env_names().iter().copied()));
-    let api_backend = match platform.wire_api() {
+    let api_backend = match wire_api {
         kigi_models::PlatformWireApi::ChatCompletions => {
             crate::sampling::ApiBackend::ChatCompletions
         }
         kigi_models::PlatformWireApi::Responses => crate::sampling::ApiBackend::Responses,
         kigi_models::PlatformWireApi::Messages => crate::sampling::ApiBackend::Messages,
     };
-    let auth_scheme = match platform.key_header() {
+    let auth_scheme = match key_header {
         kigi_models::PlatformKeyHeader::Bearer => None,
         kigi_models::PlatformKeyHeader::XApiKey => Some(kigi_sampler::AuthScheme::XApiKey),
     };
     crate::agent::config::ModelEntryConfig {
-        id: Some(platform.managed_model_key(&wire.id)),
+        id: Some(id),
         name: Some(wire.display_name.clone().unwrap_or_else(|| wire.id.clone())),
         model: wire.id,
         base_url: base_url.to_owned(),
@@ -674,15 +731,7 @@ pub(crate) fn platform_wire_model_to_entry(
         inference_idle_timeout_secs: None,
         max_retries: None,
         hidden: false,
-        // `supported_in_api: false` hides a model unless the PRIMARY session is
-        // an OAuth session (`ModelInfo::visible_for_auth`). Only `kimi-code`
-        // rides that primary session, so only it may be gated on it. Every
-        // other OAuth platform (claude-pro-max, openai-codex, github-copilot,
-        // xai-grok) carries its OWN pooled credential, and its models only
-        // enter the catalog once THAT provider is signed in — gating them on
-        // the Kimi session would hide every model from a user who signed in
-        // with only a Claude/ChatGPT/Copilot/Grok subscription.
-        supported_in_api: platform != kigi_models::PlatformId::KimiCode,
+        supported_in_api,
         supports_backend_search: false,
         compactions_remaining: None,
         compaction_at_tokens: None,

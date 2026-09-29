@@ -202,6 +202,15 @@ impl CredentialAuthority {
     /// Deliberately NOT [`crate::util::is_first_party_url`], which is
     /// production-only and would break every custom deployment.
     fn is_session_coding_endpoint(&self, base_url: &str) -> bool {
+        // Declared custom providers are never the session's endpoint.
+        if self
+            .endpoints
+            .custom_provider_bases
+            .iter()
+            .any(|base| crate::util::matches_trusted_base_url(base_url, base))
+        {
+            return false;
+        }
         if crate::util::is_effective_coding_endpoint_url(base_url) {
             return true;
         }
@@ -420,6 +429,38 @@ mod tests {
                 "{url}: the session's own endpoint is byte-identical"
             );
         }
+    }
+
+    /// LEAK guard: a declared loopback custom provider never gets the primary.
+    #[test]
+    fn declared_custom_provider_hosts_never_receive_the_primary() {
+        let (_d, kimi) = primary("kimi-tok");
+        let endpoints = EndpointsConfig {
+            custom_provider_bases: vec![
+                "http://localhost:11434/v1".to_owned(),
+                "https://gw.example/v1".to_owned(),
+            ],
+            ..EndpointsConfig::default()
+        };
+        let auth = authority(endpoints, kimi);
+        for url in [
+            "http://localhost:11434/v1",
+            "http://localhost:11434/v1/chat/completions",
+            "https://gw.example/v1",
+        ] {
+            assert_eq!(
+                auth.credential_class(None, url),
+                CredentialClass::None,
+                "{url}"
+            );
+            assert!(auth.credential_for(None, url).is_none(), "{url}");
+            assert!(auth.manager_for(None, url).is_none(), "{url}");
+        }
+        assert_eq!(
+            auth.credential_class(None, "http://localhost:3000/v1"),
+            CredentialClass::Primary,
+            "an undeclared loopback proxy keeps the session bearer"
+        );
     }
 
     /// LEAK guard: every API-key registry platform, and any platform-less model

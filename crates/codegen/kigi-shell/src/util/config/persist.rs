@@ -9,7 +9,7 @@ use toml::map::Map as TomlMap;
 ///
 /// Serializes the read-modify-write in `save_config` so two rapid
 /// settings toggles can't interleave and clobber each other.
-static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn save_config(config: &Config) -> Result<()> {
     let _guard = SAVE_LOCK.lock().await;

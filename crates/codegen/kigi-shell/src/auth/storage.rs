@@ -619,6 +619,15 @@ pub fn store_platform_api_key(
             ),
         ));
     }
+    store_scoped_api_key(kigi_home, platform.as_str(), api_key)
+}
+
+/// Stores a key under `scope`; callers own the name.
+pub(crate) fn store_scoped_api_key(
+    kigi_home: &Path,
+    scope: &str,
+    api_key: &str,
+) -> std::io::Result<()> {
     let path = kigi_home.join("auth.json");
     // Serialize with the manager's cross-process auth.json writers (token
     // refresh holds the same flock): an unlocked read-modify-write here
@@ -641,7 +650,7 @@ pub fn store_platform_api_key(
     };
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
     map.insert(
-        platform.as_str().to_owned(),
+        scope.to_owned(),
         KimiAuth {
             key: api_key.to_owned(),
             auth_mode: AuthMode::ApiKey,

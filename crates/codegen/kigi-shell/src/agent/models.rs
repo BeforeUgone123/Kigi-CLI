@@ -73,6 +73,7 @@ enum CacheAuthMethod {
 #[derive(Clone, Default)]
 pub(crate) struct PlatformApiKeys {
     keys: std::collections::BTreeMap<kigi_models::PlatformId, String>,
+    custom: Vec<super::custom_providers::CredentialedProvider>,
 }
 
 impl std::fmt::Debug for PlatformApiKeys {
@@ -83,6 +84,7 @@ impl std::fmt::Debug for PlatformApiKeys {
                 s.field(platform.as_str(), &self.keys.contains_key(&platform));
             }
         }
+        s.field("custom", &self.custom);
         s.finish()
     }
 }
@@ -114,7 +116,13 @@ impl PlatformApiKeys {
                 keys.insert(platform, key);
             }
         }
-        Self { keys }
+        let custom = super::custom_providers::credentialed(platforms, |name| {
+            stored
+                .as_ref()
+                .and_then(|m| m.get(name))
+                .map(|a| a.key.clone())
+        });
+        Self { keys, custom }
     }
 
     /// Resolve from the effective on-disk config (startup paths that have no
@@ -135,7 +143,11 @@ impl PlatformApiKeys {
     /// Any API-key platform credentialed? Drives "should we prefetch without
     /// a session" and the F2 acceptance path (platform key only, no login).
     pub(crate) fn any(&self) -> bool {
-        !self.keys.is_empty()
+        !self.keys.is_empty() || !self.custom.is_empty()
+    }
+
+    pub(crate) fn custom(&self) -> &[super::custom_providers::CredentialedProvider] {
+        &self.custom
     }
 
     /// Test-only constructor (fields are private to this module).
@@ -148,7 +160,18 @@ impl PlatformApiKeys {
         if let Some(k) = ai {
             keys.insert(kigi_models::PlatformId::MoonshotAi, k.to_owned());
         }
-        Self { keys }
+        Self {
+            keys,
+            custom: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_custom(custom: Vec<super::custom_providers::CredentialedProvider>) -> Self {
+        Self {
+            keys: Default::default(),
+            custom,
+        }
     }
 
     /// Test-only constructor for a single API-key platform.
@@ -156,6 +179,7 @@ impl PlatformApiKeys {
     pub(crate) fn test_single(platform: kigi_models::PlatformId, key: &str) -> Self {
         Self {
             keys: std::collections::BTreeMap::from([(platform, key.to_owned())]),
+            custom: Vec::new(),
         }
     }
 }
@@ -3698,12 +3722,14 @@ mod tests {
             "moonshot-cn".into(),
             config::PlatformCredentialConfig {
                 api_key: Some("cfg-cn".into()),
+                ..Default::default()
             },
         );
         platforms.entries.insert(
             "moonshot-ai".into(),
             config::PlatformCredentialConfig {
                 api_key: Some("cfg-ai".into()),
+                ..Default::default()
             },
         );
 

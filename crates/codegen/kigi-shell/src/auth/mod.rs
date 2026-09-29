@@ -32,6 +32,7 @@ pub use manager::{AuthManager, shared_api_key_provider};
 pub use meta::AuthMeta;
 pub use model::{AuthMode, KimiAuth, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, is_expired, token_suffix};
+pub(crate) use storage::store_scoped_api_key;
 pub use storage::{
     clear_api_key, read_api_key, read_auth_json, read_platform_api_key, read_token_by_scope,
     store_api_key, store_platform_api_key,
