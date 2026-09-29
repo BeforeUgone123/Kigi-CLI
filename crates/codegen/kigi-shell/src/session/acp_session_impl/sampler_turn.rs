@@ -264,6 +264,16 @@ impl SessionActor {
     fn aux_model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
         self.resolve_auth_facts(model_id, false)
     }
+    /// Facts from the live catalog entry the session samples against.
+    fn live_auth_facts(&self, model_id: &str) -> Option<crate::agent::config::ModelAuthFacts> {
+        let models = self.models_manager.models();
+        crate::agent::models::entry_for_slug(
+            &models,
+            self.selected_catalog_key().as_deref(),
+            model_id,
+        )
+        .map(crate::agent::config::auth_facts_of)
+    }
     /// Shared body of [`Self::model_auth_facts`] / [`Self::aux_model_auth_facts`].
     /// `memoize` is the ONLY difference, so the two can never resolve differently.
     fn resolve_auth_facts(
@@ -278,7 +288,9 @@ impl SessionActor {
         {
             return *facts;
         }
-        let fresh = crate::agent::config::resolve_model_auth_facts(model_id);
+        let fresh = self
+            .live_auth_facts(model_id)
+            .unwrap_or_else(|| crate::agent::config::resolve_model_auth_facts(model_id));
         if fresh.byok == ModelByok::Unknown {
             if let Some((cached_id, facts)) = self.model_auth_facts.borrow().as_ref()
                 && cached_id == model_id

@@ -897,9 +897,17 @@ async fn read_parent_sampling_config(
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
-                .map(|r| r.auth_scheme)
-                .unwrap_or_default();
+            let auth_scheme = crate::agent::models::entry_for_slug(
+                &ctx.available_models,
+                Some(ctx.model_id.0.as_ref()),
+                &cfg.model,
+            )
+            .map(|entry| crate::agent::config::auth_facts_of(entry).auth_scheme)
+            .or_else(|| {
+                crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
+                    .map(|r| r.auth_scheme)
+            })
+            .unwrap_or_default();
             // Claude Pro/Max OAuth Messages adaptation inherits from the parent
             // model's platform (claude-pro-max → true); every other platform,
             // and BYOK, → false, so the API-key paths stay byte-identical.

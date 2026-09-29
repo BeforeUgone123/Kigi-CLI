@@ -3960,6 +3960,18 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
         },
     })
 }
+/// Auth facts of a catalog entry the caller already holds. A fetched entry
+/// exists only in the live catalog, never in a disk reload.
+pub(crate) fn auth_facts_of(entry: &ModelEntry) -> ModelAuthFacts {
+    ModelAuthFacts {
+        byok: if entry.has_own_credentials() {
+            ModelByok::Byok
+        } else {
+            ModelByok::NotByok
+        },
+        auth_scheme: entry.info().auth_scheme,
+    }
+}
 fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
     match lookup {
         ModelLookup::ConfigUnavailable => ModelByok::Unknown,
@@ -5273,6 +5285,17 @@ reasoning_effort = "low"
             auth_type: kigi_chat_state::AuthType::ApiKey,
             auth_scheme: Default::default(),
         }
+    }
+    /// A fetched entry's scheme and BYOK status come from the entry itself.
+    #[test]
+    fn auth_facts_come_from_the_held_entry() {
+        let mut model = test_model_entry("claude-x", "https://gw.example/v1", None, None, None);
+        model.info.auth_scheme = AuthScheme::XApiKey;
+        let facts = auth_facts_of(&model);
+        assert_eq!(facts.auth_scheme, AuthScheme::XApiKey);
+        assert_eq!(facts.byok, ModelByok::NotByok);
+        model.api_key = Some("sk-own".into());
+        assert_eq!(auth_facts_of(&model).byok, ModelByok::Byok);
     }
     #[test]
     fn x_api_key_auth_scheme_flows_from_config_to_sampler() {
