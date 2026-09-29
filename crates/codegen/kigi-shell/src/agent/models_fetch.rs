@@ -1559,6 +1559,7 @@ mod tests {
                 .map(|m| m.id.as_deref().unwrap_or_default())
                 .collect::<Vec<_>>(),
             vec![
+                "openai-codex/gpt-6.1-sol",
                 "openai-codex/gpt-6-astra",
                 "openai-codex/gpt-6-sol",
                 "openai-codex/gpt-6-luna",
@@ -1567,7 +1568,7 @@ mod tests {
                 "openai-codex/gpt-5.6-luna",
                 "openai-codex/gpt-5.5",
             ],
-            "exactly the 7 hardcoded models, keyed openai-codex/<slug>"
+            "exactly the 8 hardcoded models, keyed openai-codex/<slug>"
         );
         // Excluded models never appear.
         for absent in ["openai-codex/gpt-reserve", "openai-codex/codex-auto-review"] {
@@ -1579,9 +1580,9 @@ mod tests {
                 "{absent} must be absent from the hardcoded catalog"
             );
         }
-        let astra = &result.models[0];
-        assert_eq!(astra.name.as_deref(), Some("GPT-6-Astra"));
-        assert_eq!(astra.context_window.get(), 272_000);
+        let first = &result.models[0];
+        assert_eq!(first.name.as_deref(), Some("GPT-6.1-Sol"));
+        assert_eq!(first.context_window.get(), 272_000);
         let sol = result
             .models
             .iter()

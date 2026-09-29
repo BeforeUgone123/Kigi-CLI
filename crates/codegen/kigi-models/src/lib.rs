@@ -1286,8 +1286,8 @@ const OPENAI_CODEX_SPEC: PlatformSpec = PlatformSpec {
     strip_listing_id_prefix: None,
 };
 
-/// The platform registry. Platforms are compiled-in spec rows; there is no
-/// dynamic provider registration (PRD F2).
+/// The platform registry. Platforms are compiled-in spec rows; user-declared
+/// providers live in [`custom`], never here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlatformId {
     /// Kimi Code subscription (OAuth bearer from the F1 device flow).
@@ -1571,8 +1571,8 @@ impl PlatformId {
     /// The compiled-in catalog for a platform that serves NO live `/models`
     /// listing (openai-codex), or `None` when the catalog comes from the wire.
     ///
-    /// openai-codex's 7 models are HARDCODED (read from the Codex backend
-    /// catalog on 2026-09-22, the `visibility=="list"` AND
+    /// openai-codex's 8 models are HARDCODED (read from the Codex backend
+    /// catalog on 2026-09-29, the `visibility=="list"` AND
     /// `supported_in_api==true` set) because OpenAI exposes no stable public
     /// models endpoint for the
     /// ChatGPT Codex backend. Each entry carries context window + per-model
@@ -1608,8 +1608,8 @@ fn codex_wire_model(slug: &str, display_name: &str, efforts: &[&str], default: &
     }
 }
 
-/// The HARDCODED openai-codex catalog: exactly the 7 `visibility=="list"` AND
-/// `supported_in_api==true` models the Codex backend served on 2026-09-22, in
+/// The HARDCODED openai-codex catalog: exactly the 8 `visibility=="list"` AND
+/// `supported_in_api==true` models the Codex backend served on 2026-09-29, in
 /// its own priority order. `gpt-reserve` and `codex-auto-review`
 /// (visibility="hide") are deliberately EXCLUDED — they are not user-facing
 /// (fail-fast: never advertise a model the backend rejects). Several models
@@ -1617,6 +1617,12 @@ fn codex_wire_model(slug: &str, display_name: &str, efforts: &[&str], default: &
 /// is not listed here.
 fn openai_codex_wire_models() -> Vec<WireModel> {
     vec![
+        codex_wire_model(
+            "gpt-6.1-sol",
+            "GPT-6.1-Sol",
+            &["low", "medium", "high", "xhigh", "max"],
+            "low",
+        ),
         codex_wire_model(
             "gpt-6-astra",
             "GPT-6-Astra",
@@ -2674,13 +2680,13 @@ mod tests {
         assert_eq!(c.base_url(), "https://mock.codex/codex");
     }
 
-    /// The HARDCODED openai-codex catalog is exactly the 7 supported+listed
+    /// The HARDCODED openai-codex catalog is exactly the 8 supported+listed
     /// models, keyed by slug, ctx 272000, each exposing its exact supported
     /// efforts (incl. the codex-only `xhigh`/`max` tiers). The hidden models
     /// are absent. Every other platform serves NO hardcoded catalog (its
     /// models come from the live wire).
     #[test]
-    fn openai_codex_hardcoded_catalog_is_the_seven_supported_models() {
+    fn openai_codex_hardcoded_catalog_is_the_eight_supported_models() {
         let catalog = PlatformId::OpenaiCodex
             .hardcoded_catalog()
             .expect("openai-codex serves a hardcoded catalog");
@@ -2688,6 +2694,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "gpt-6.1-sol",
                 "gpt-6-astra",
                 "gpt-6-sol",
                 "gpt-6-luna",
@@ -2696,7 +2703,7 @@ mod tests {
                 "gpt-5.6-luna",
                 "gpt-5.5"
             ],
-            "exactly the 7 visibility=list AND supported_in_api=true models"
+            "exactly the 8 visibility=list AND supported_in_api=true models"
         );
         // Excluded: hidden models never appear.
         for absent in ["gpt-reserve", "codex-auto-review"] {
@@ -2728,6 +2735,10 @@ mod tests {
             efforts("gpt-6-astra"),
             ["low", "medium", "high", "xhigh", "max"],
             "`ultra` is advertised above `max` but kigi has no such level"
+        );
+        assert_eq!(
+            efforts("gpt-6.1-sol"),
+            ["low", "medium", "high", "xhigh", "max"]
         );
         assert_eq!(
             efforts("gpt-6-sol"),
@@ -2762,6 +2773,7 @@ mod tests {
                 .default_effort
                 .clone()
         };
+        assert_eq!(default("gpt-6.1-sol").as_deref(), Some("low"));
         assert_eq!(default("gpt-6-astra").as_deref(), Some("medium"));
         assert_eq!(default("gpt-6-sol").as_deref(), Some("medium"));
         assert_eq!(default("gpt-6-luna").as_deref(), Some("medium"));
