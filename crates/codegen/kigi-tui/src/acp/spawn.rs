@@ -1,7 +1,7 @@
-//! Agent spawning — creates the agent process and ACP channels.
+//! Agent spawning — creates the agent and ACP channels.
 //!
-//! Only KigiShell (in-process) mode is supported; subprocess and remote modes
-//! can be added later if needed.
+//! The default is KigiShell (in-process); `--external-agent` swaps in a
+//! child-process ACP agent (e.g. `devin acp`) over newline-delimited stdio.
 
 use std::rc::Rc;
 use std::thread;
@@ -30,12 +30,16 @@ pub struct SpawnedAgent {
     pub auth_manager: std::sync::Arc<AuthManager>,
 }
 
-/// Spawn a KigiShell agent in a background thread.
-pub async fn spawn_kigi_shell(
-    agent_config: AgentConfig,
-    cancel: &CancellationToken,
-    memory_config: Option<kigi_shell::config::MemoryConfig>,
-) -> Result<SpawnedAgent> {
+/// Pager-side prerequisites shared by every agent transport: the `AuthManager`
+/// pager consumers resolve bearers through, plus the bootstrap sequence
+/// (managed policy, bundled skills, model catalog) local features depend on.
+async fn bootstrap_pager_side(
+    agent_config: &AgentConfig,
+) -> Result<(
+    std::sync::Arc<AuthManager>,
+    AgentConfig,
+    kigi_shell::agent::models::ModelsManager,
+)> {
     let auth_manager = std::sync::Arc::new(AuthManager::new(
         &kigi_home(),
         agent_config.kimi_code_config.clone(),
@@ -54,11 +58,21 @@ pub async fn spawn_kigi_shell(
     // singletons (including `extract_bundled_files` which writes compiled-in
     // skills to ~/.kigi/skills/), and model catalog construction.
     let (agent_config, models_manager) =
-        kigi_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
+        kigi_shell::agent::init::bootstrap(agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
     models_manager
         .list_models(RefreshStrategy::OnlineIfUncached)
         .await;
+    Ok((auth_manager, agent_config, models_manager))
+}
+
+/// Spawn a KigiShell agent in a background thread.
+pub async fn spawn_kigi_shell(
+    agent_config: AgentConfig,
+    cancel: &CancellationToken,
+    memory_config: Option<kigi_shell::config::MemoryConfig>,
+) -> Result<SpawnedAgent> {
+    let (auth_manager, agent_config, models_manager) = bootstrap_pager_side(&agent_config).await?;
 
     let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();
@@ -87,6 +101,29 @@ pub async fn spawn_kigi_shell(
         channel: acp_client,
         cancel: agent_cancel,
         auth_manager: auth_manager_for_pager,
+    })
+}
+
+/// Spawn an external ACP agent command (e.g. `devin acp`) as a child process.
+///
+/// The child speaks ACP JSON-RPC over newline-delimited stdio — the same wire
+/// format as `kigi agent`. Pager-side services still get the kigi
+/// `AuthManager`/bootstrap so local features keep working; the external agent
+/// manages its own credentials and model catalog.
+pub async fn spawn_external_agent(
+    command: &str,
+    agent_config: AgentConfig,
+    cancel: &CancellationToken,
+) -> Result<SpawnedAgent> {
+    let (auth_manager, _agent_config, _models_manager) =
+        bootstrap_pager_side(&agent_config).await?;
+    let agent_cancel = cancel.child_token();
+    let bridge = super::external::spawn_external(command, agent_cancel.clone())?;
+    Ok(SpawnedAgent {
+        _thread_handle: bridge.thread_handle,
+        channel: bridge.channel,
+        cancel: agent_cancel,
+        auth_manager,
     })
 }
 
