@@ -812,6 +812,9 @@ pub struct PlatformCredentialConfig {
     /// `"openai"` or `"anthropic"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
+    /// A custom provider's login-curated model allowlist; absent = whole listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
 }
 
 /// Resolve the API key for an API-key registry platform with injected env
@@ -2628,6 +2631,11 @@ pub(crate) fn resolve_model_list(
         }
         resolved = prefetched;
     }
+    crate::agent::custom_providers::synthesize_selected(
+        &mut resolved,
+        &cfg.platforms,
+        platform_keys.custom(),
+    );
     let mut explicit_api_backend_keys = std::collections::HashSet::new();
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -2656,8 +2664,18 @@ pub(crate) fn resolve_model_list(
         );
         resolved.insert(key.clone(), entry);
     }
+    crate::agent::custom_providers::filter_unselected(
+        &mut resolved,
+        &cfg.platforms,
+        platform_keys.custom(),
+    );
     {
         let default_cw = DEFAULT_CONTEXT_WINDOW;
+        let custom_prefixes: Vec<String> = platform_keys
+            .custom()
+            .iter()
+            .map(|c| format!("{}/", c.provider.name))
+            .collect();
         let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
             resolved
                 .values()
@@ -2680,7 +2698,11 @@ pub(crate) fn resolve_model_list(
                     entry.info.context_window = *donor_cw;
                 }
                 // An explicit `[model.X] api_backend` wins even when it is the default.
+                // A provider-owned entry keeps its declared wire too.
                 if !explicit_api_backend_keys.contains(key.as_str())
+                    && !custom_prefixes
+                        .iter()
+                        .any(|p| key.as_str().starts_with(p.as_str()))
                     && entry.info.api_backend == ApiBackend::default()
                     && *donor_backend != ApiBackend::default()
                 {

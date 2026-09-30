@@ -1,7 +1,7 @@
 //! Custom provider login steps: base URL, name, key.
 
 use kigi_shell::models::custom::{
-    CustomApi, CustomProvider, default_name, normalize_base_url, validate_name,
+    CustomApi, CustomProvider, default_name, normalize_base_url, validate_model_id, validate_name,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +141,141 @@ impl CustomEntryDraft {
     }
 }
 
+/// Fetch status of the model-selection screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectFetch {
+    InFlight,
+    Listed,
+    Failed(String),
+}
+
+/// One selectable model row; `manual` marks user-typed ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectRow {
+    pub id: String,
+    pub selected: bool,
+    pub manual: bool,
+}
+
+/// Model selection after the key step: fetched rows plus manual adds.
+#[derive(Clone)]
+pub struct CustomSelectState {
+    /// The fetch may adopt a `/v1` base URL.
+    pub provider: CustomProvider,
+    key: String,
+    pub rows: Vec<SelectRow>,
+    pub highlight: usize,
+    pub fetch: SelectFetch,
+    pub error: Option<String>,
+    /// Enter hit while the listing is in flight; it completes on arrival.
+    pub finish_requested: bool,
+}
+
+impl CustomSelectState {
+    pub fn new(provider: CustomProvider, key: String) -> Self {
+        Self {
+            provider,
+            key,
+            rows: Vec::new(),
+            highlight: 0,
+            fetch: SelectFetch::InFlight,
+            error: None,
+            finish_requested: false,
+        }
+    }
+
+    pub fn take_key(self) -> String {
+        self.key
+    }
+
+    pub fn apply_fetch(&mut self, fetch: kigi_shell::agent::custom_providers::LoginFetch) {
+        self.provider = fetch.provider;
+        for id in fetch.model_ids {
+            if self.rows.iter().any(|r| r.id == id) {
+                continue;
+            }
+            self.rows.push(SelectRow {
+                id,
+                selected: false,
+                manual: false,
+            });
+        }
+        self.fetch = SelectFetch::Listed;
+    }
+
+    pub fn fail_fetch(&mut self, reason: String) {
+        self.fetch = SelectFetch::Failed(reason);
+    }
+
+    pub fn move_highlight(&mut self, delta: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let max = self.rows.len() - 1;
+        self.highlight = self.highlight.saturating_add_signed(delta).min(max);
+    }
+
+    pub fn toggle_highlighted(&mut self) {
+        if let Some(row) = self.rows.get_mut(self.highlight) {
+            row.selected = !row.selected;
+        }
+    }
+
+    /// Adds a typed id selected; an id already listed just gets selected.
+    pub fn add_manual(&mut self, raw: &str) {
+        let id = raw.trim();
+        if let Err(e) = validate_model_id(id) {
+            self.error = Some(e.to_string());
+            return;
+        }
+        if let Some(row) = self.rows.iter_mut().find(|r| r.id == id) {
+            row.selected = true;
+        } else {
+            self.rows.push(SelectRow {
+                id: id.to_owned(),
+                selected: true,
+                manual: true,
+            });
+        }
+        self.error = None;
+    }
+
+    /// The chosen ids, or a refusal when nothing is chosen.
+    pub fn try_finish(&mut self) -> Option<Vec<String>> {
+        // Wait for the listing: it may adopt a probed `/v1` base URL.
+        if self.fetch == SelectFetch::InFlight {
+            self.finish_requested = true;
+            return None;
+        }
+        let ids: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.selected)
+            .map(|r| r.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.finish_requested = false;
+            self.error = Some("Select at least one model, or type one and press enter".to_owned());
+            return None;
+        }
+        Some(ids)
+    }
+}
+
+impl std::fmt::Debug for CustomSelectState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomSelectState")
+            .field("provider", &self.provider)
+            .field("key", &"<set>")
+            .field("rows", &self.rows)
+            .field("highlight", &self.highlight)
+            .field("fetch", &self.fetch)
+            .field("error", &self.error)
+            .field("finish_requested", &self.finish_requested)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +370,70 @@ mod tests {
         assert!(step(CustomEntryField::Key).masks_input());
         assert!(!step(CustomEntryField::BaseUrl).masks_input());
         assert!(!step(CustomEntryField::Name).masks_input());
+    }
+
+    fn select_state() -> CustomSelectState {
+        let provider =
+            CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/v1").unwrap();
+        CustomSelectState::new(provider, "sk-secret".to_owned())
+    }
+
+    #[test]
+    fn select_state_toggles_adds_and_finishes() {
+        let mut state = select_state();
+        assert!(state.try_finish().is_none(), "in flight: finish waits");
+        assert!(state.finish_requested && state.error.is_none());
+        state.finish_requested = false;
+
+        state.apply_fetch(kigi_shell::agent::custom_providers::LoginFetch {
+            provider: state.provider.clone(),
+            model_ids: vec!["m1".to_owned(), "m2".to_owned()],
+        });
+        assert!(state.try_finish().is_none());
+        assert!(state.error.is_some(), "listed: an empty selection refuses");
+        assert_eq!(state.rows.len(), 2);
+
+        state.toggle_highlighted();
+        state.move_highlight(1);
+        state.toggle_highlighted();
+        state.move_highlight(9);
+        assert_eq!(state.highlight, 1, "highlight clamps at the last row");
+
+        state.add_manual(" claude-opus-5-5[1m] ");
+        assert_eq!(state.rows.len(), 3);
+        state.add_manual("m1");
+        assert_eq!(
+            state.rows.len(),
+            3,
+            "a listed id is selected, not duplicated"
+        );
+        state.add_manual("has space");
+        assert!(state.error.is_some());
+        assert_eq!(state.rows.len(), 3);
+
+        let ids = state.try_finish().expect("three selected");
+        assert_eq!(ids, ["m1", "m2", "claude-opus-5-5[1m]"]);
+    }
+
+    #[test]
+    fn select_state_apply_fetch_adopts_the_probed_base_and_dedups() {
+        let mut state = select_state();
+        state.add_manual("m1");
+        let adopted =
+            CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/coding/v1").unwrap();
+        state.apply_fetch(kigi_shell::agent::custom_providers::LoginFetch {
+            provider: adopted,
+            model_ids: vec!["m1".to_owned(), "m2".to_owned()],
+        });
+        assert_eq!(state.provider.base_url, "https://h.example/coding/v1");
+        assert_eq!(state.rows.len(), 2, "the manual row covers the fetched id");
+        assert!(state.rows[0].manual && state.rows[0].selected);
+        assert!(!state.rows[1].selected);
+    }
+
+    #[test]
+    fn select_state_debug_hides_the_key() {
+        let state = select_state();
+        assert!(!format!("{state:?}").contains("sk-secret"));
     }
 }

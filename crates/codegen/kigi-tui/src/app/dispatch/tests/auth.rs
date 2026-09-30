@@ -582,9 +582,9 @@ fn custom_field(app: &AppView) -> crate::app::custom_entry::CustomEntryField {
     }
 }
 
-/// URL, name, key; the last Enter emits one persist effect.
+/// URL, name, key; the last Enter opens the selection screen and fetches.
 #[test]
-fn custom_provider_steps_end_in_one_persist_effect() {
+fn custom_provider_steps_end_in_the_model_selection() {
     use crate::app::custom_entry::CustomEntryField;
     use kigi_shell::models::custom::CustomApi;
 
@@ -619,7 +619,7 @@ fn custom_provider_steps_end_in_one_persist_effect() {
     let effects = dispatch(Action::SubmitCustomProviderInput("sk-gw".into()), &mut app);
     match effects.as_slice() {
         [
-            Effect::PersistCustomProviderAndAuthenticate {
+            Effect::FetchCustomProviderModels {
                 request_seq,
                 provider,
                 key,
@@ -631,21 +631,236 @@ fn custom_provider_steps_end_in_one_persist_effect() {
             assert_eq!(provider.base_url, "https://api.gw.example/v1");
             assert_eq!(key, "sk-gw");
         }
-        other => panic!("expected exactly the persist effect, got {other:?}"),
+        other => panic!("expected exactly the fetch effect, got {other:?}"),
     }
     assert!(matches!(
         app.auth_state,
         AuthState::Authenticating {
             request_seq,
-            mode: AuthMode::Pending,
+            mode: AuthMode::CustomProviderSelect,
             ..
         } if request_seq == seq
+    ));
+    assert!(app.custom_select.is_some());
+    assert!(app.auth_code_input.is_empty());
+}
+
+/// The listing fills rows; the selection persists only the chosen models.
+#[test]
+fn custom_provider_selection_persists_the_chosen_models() {
+    use kigi_shell::models::custom::{CustomApi, CustomProvider};
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::OpenAi),
+        &mut app,
+    );
+    dispatch(
+        Action::SubmitCustomProviderInput("https://h.example".into()),
+        &mut app,
+    );
+    dispatch(Action::SubmitCustomProviderInput("gw".into()), &mut app);
+    dispatch(Action::SubmitCustomProviderInput("sk-gw".into()), &mut app);
+    let seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => *request_seq,
+        _ => unreachable!(),
+    };
+
+    // The listing lands: rows appear, the probed base is adopted.
+    let adopted = CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/v1").unwrap();
+    let listed = kigi_shell::agent::custom_providers::LoginFetch {
+        provider: adopted,
+        model_ids: vec!["m1".to_owned(), "m2".to_owned()],
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::CustomProviderModelsListed {
+            request_seq: seq,
+            result: Ok(listed),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let state = app.custom_select.as_ref().expect("selection lives");
+    assert_eq!(state.provider.base_url, "https://h.example/v1");
+    assert_eq!(state.rows.len(), 2);
+    assert!(!state.rows[0].selected);
+
+    // An empty selection refuses to finish once the listing resolved.
+    assert!(dispatch(Action::SubmitCustomProviderSelection, &mut app).is_empty());
+    assert!(
+        app.custom_select
+            .as_ref()
+            .and_then(|s| s.error.as_deref())
+            .is_some()
+    );
+
+    // A late manual id typed before the fetch survives the fill.
+    let state = app.custom_select.as_mut().expect("selection lives");
+    state.add_manual("claude-opus-5-5[1m]");
+    assert_eq!(state.rows.len(), 3);
+    assert!(state.rows[2].manual && state.rows[2].selected);
+
+    // Select m2 as well, then finish.
+    let state = app.custom_select.as_mut().expect("selection lives");
+    state.highlight = 1;
+    state.toggle_highlighted();
+    let effects = dispatch(Action::SubmitCustomProviderSelection, &mut app);
+    match effects.as_slice() {
+        [
+            Effect::PersistCustomProviderAndAuthenticate {
+                request_seq,
+                provider,
+                key,
+                models,
+            },
+        ] => {
+            assert_eq!(*request_seq, seq);
+            assert_eq!(provider.base_url, "https://h.example/v1");
+            assert_eq!(key, "sk-gw");
+            assert_eq!(models, &["m2".to_owned(), "claude-opus-5-5[1m]".to_owned()]);
+        }
+        other => panic!("expected the persist effect, got {other:?}"),
+    }
+    assert!(app.custom_select.is_none());
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Authenticating {
+            mode: AuthMode::Pending,
+            ..
+        }
     ));
     assert_eq!(
         app.auth_in_flight_method.as_ref().map(|m| m.0.as_ref()),
         Some("custom:gw")
     );
-    assert!(app.auth_code_input.is_empty());
+}
+
+/// Finishing while the listing is in flight completes when it lands.
+#[test]
+fn custom_provider_selection_finish_waits_for_the_fetch() {
+    use kigi_shell::models::custom::{CustomApi, CustomProvider};
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::OpenAi),
+        &mut app,
+    );
+    dispatch(
+        Action::SubmitCustomProviderInput("https://h.example".into()),
+        &mut app,
+    );
+    dispatch(Action::SubmitCustomProviderInput("gw".into()), &mut app);
+    dispatch(Action::SubmitCustomProviderInput("sk-gw".into()), &mut app);
+    let seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => *request_seq,
+        _ => unreachable!(),
+    };
+
+    let state = app.custom_select.as_mut().expect("selection lives");
+    state.add_manual("m1");
+    // Enter with an empty box while the fetch runs: no persist yet.
+    assert!(dispatch(Action::SubmitCustomProviderSelection, &mut app).is_empty());
+    assert!(app.custom_select.as_ref().expect("lives").finish_requested);
+    assert!(matches!(
+        app.auth_state,
+        AuthState::Authenticating {
+            mode: AuthMode::CustomProviderSelect,
+            ..
+        }
+    ));
+
+    // The listing lands with an adopted /v1 base; the finish fires now.
+    let adopted = CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/v1").unwrap();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::CustomProviderModelsListed {
+            request_seq: seq,
+            result: Ok(kigi_shell::agent::custom_providers::LoginFetch {
+                provider: adopted,
+                model_ids: vec!["m2".to_owned()],
+            }),
+        }),
+        &mut app,
+    );
+    match effects.as_slice() {
+        [
+            Effect::PersistCustomProviderAndAuthenticate {
+                provider, models, ..
+            },
+        ] => {
+            assert_eq!(provider.base_url, "https://h.example/v1");
+            assert_eq!(models, &["m1".to_owned()]);
+        }
+        other => panic!("expected the persist effect, got {other:?}"),
+    }
+    assert!(app.custom_select.is_none());
+}
+
+/// A failed listing keeps the manual input usable and shows the reason.
+#[test]
+fn custom_provider_selection_survives_a_failed_fetch() {
+    use kigi_shell::models::custom::CustomApi;
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    dispatch(
+        Action::BeginCustomProviderEntry(CustomApi::OpenAi),
+        &mut app,
+    );
+    dispatch(
+        Action::SubmitCustomProviderInput("https://h.example/v1".into()),
+        &mut app,
+    );
+    dispatch(Action::SubmitCustomProviderInput("gw".into()), &mut app);
+    dispatch(Action::SubmitCustomProviderInput("sk-gw".into()), &mut app);
+    let seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => *request_seq,
+        _ => unreachable!(),
+    };
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::CustomProviderModelsListed {
+            request_seq: seq,
+            result: Err("https://h.example/v1/models answered HTTP 404".to_owned()),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    let state = app.custom_select.as_ref().expect("selection lives");
+    assert!(matches!(
+        &state.fetch,
+        crate::app::custom_entry::SelectFetch::Failed(reason) if reason.contains("404")
+    ));
+
+    // A stale result for an older request never clobbers the screen.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::CustomProviderModelsListed {
+            request_seq: seq + 99,
+            result: Ok(kigi_shell::agent::custom_providers::LoginFetch {
+                provider: state.provider.clone(),
+                model_ids: vec!["stale".to_owned()],
+            }),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(
+        app.custom_select
+            .as_ref()
+            .expect("selection lives")
+            .rows
+            .is_empty()
+    );
+
+    // Manual add still finishes the flow.
+    let state = app.custom_select.as_mut().expect("selection lives");
+    state.add_manual("m1");
+    let effects = dispatch(Action::SubmitCustomProviderSelection, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistCustomProviderAndAuthenticate { models, .. }] if models == &["m1".to_owned()]
+    ));
 }
 
 /// A refused field keeps the user on it.

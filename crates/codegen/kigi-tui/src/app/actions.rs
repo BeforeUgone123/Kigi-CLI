@@ -574,6 +574,8 @@ pub enum Action {
     BeginCustomProviderEntry(kigi_shell::models::custom::CustomApi),
     /// Enter in a custom provider step.
     SubmitCustomProviderInput(String),
+    /// Enter on an empty manual-model box: finish the model selection.
+    SubmitCustomProviderSelection,
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
@@ -1623,6 +1625,13 @@ pub enum Effect {
         request_seq: u64,
         provider: kigi_shell::models::custom::CustomProvider,
         key: String,
+        models: Vec<String>,
+    },
+    /// List the provider's models for the login selection screen.
+    FetchCustomProviderModels {
+        request_seq: u64,
+        provider: kigi_shell::models::custom::CustomProvider,
+        key: String,
     },
     /// Fetch MCP server list from the shell (kigi/mcp/list).
     FetchMcpsList {
@@ -2165,6 +2174,11 @@ pub enum TaskResult {
     /// Auth code was submitted (fire-and-forget).
     AuthCodeSubmitted {
         request_seq: u64,
+    },
+    /// The login-step model listing came back (or failed).
+    CustomProviderModelsListed {
+        request_seq: u64,
+        result: Result<kigi_shell::agent::custom_providers::LoginFetch, String>,
     },
     /// MCP server list fetched from shell.
     McpsListLoaded {

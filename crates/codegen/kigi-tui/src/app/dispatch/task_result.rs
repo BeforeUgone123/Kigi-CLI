@@ -509,9 +509,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 app.auth_state = AuthState::Pending { error: Some(error) };
                 app.auth_code_input.clear();
+                app.custom_select = None;
             }
             vec![]
         }
+        TaskResult::CustomProviderModelsListed {
+            request_seq,
+            result,
+        } => super::auth::handle_custom_provider_models_listed(app, request_seq, result),
         TaskResult::AuthUrlReady {
             request_seq,
             auth_url,
@@ -798,6 +803,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.login_method_id = None;
             ensure_login_method(app);
             app.auth_clipboard_copied = false;
+            app.custom_select = None;
             let effects = dispatch_exit_session(app);
             app.welcome_prompt_focused = false;
             effects

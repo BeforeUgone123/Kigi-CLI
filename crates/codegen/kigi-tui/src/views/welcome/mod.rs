@@ -462,6 +462,7 @@ pub struct WelcomeRenderParams<'a> {
     pub login_label: Option<&'a str>,
     pub auth_code_input: &'a str,
     pub custom_entry: &'a crate::app::custom_entry::CustomEntryDraft,
+    pub custom_select: Option<&'a crate::app::custom_entry::CustomSelectState>,
     pub clipboard_copied: bool,
     pub show_raw_url: bool,
     pub tip: Option<&'a str>,
@@ -605,6 +606,7 @@ pub fn render_welcome(
                 *mode,
                 params.auth_code_input,
                 params.custom_entry,
+                params.custom_select,
                 params.clipboard_copied,
                 params.show_raw_url,
             );
@@ -1179,6 +1181,7 @@ fn render_welcome_authenticating(
     mode: AuthMode,
     auth_code_input: &str,
     custom_entry: &crate::app::custom_entry::CustomEntryDraft,
+    custom_select: Option<&crate::app::custom_entry::CustomSelectState>,
     clipboard_copied: bool,
     show_raw_url: bool,
 ) -> (Option<Rect>, Option<Rect>) {
@@ -1333,6 +1336,21 @@ fn render_welcome_authenticating(
                     masked: step.masks_input(),
                 },
             );
+            (None, None)
+        }
+
+        AuthMode::CustomProviderSelect => {
+            if let Some(select) = custom_select {
+                render_custom_select(
+                    content_area,
+                    buf,
+                    theme,
+                    top_pad,
+                    logo_line_count,
+                    select,
+                    auth_code_input,
+                );
+            }
             (None, None)
         }
 
@@ -2034,6 +2052,182 @@ fn render_entry_box(
     Paragraph::new(hints).render(hint_area, buf);
 }
 
+/// The custom provider model-selection screen: fetched rows + manual input.
+fn render_custom_select(
+    content_area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    top_pad: u16,
+    logo_line_count: u16,
+    select: &crate::app::custom_entry::CustomSelectState,
+    input: &str,
+) {
+    use crate::app::custom_entry::SelectFetch;
+    let h_pad: u16 = content_area.width / 8;
+    let inner_width = content_area.width.saturating_sub(h_pad * 2).max(1);
+    let instruction = format!(
+        "Select the models to add for {} ({})",
+        select.provider.name, select.provider.base_url
+    );
+    let status: Option<(String, Style)> = match &select.fetch {
+        SelectFetch::InFlight if select.finish_requested => Some((
+            "Fetching models... finishing when the list lands".to_owned(),
+            Style::default().fg(theme.gray),
+        )),
+        SelectFetch::InFlight => Some((
+            "Fetching models...".to_owned(),
+            Style::default().fg(theme.gray),
+        )),
+        SelectFetch::Listed if select.rows.is_empty() => Some((
+            "The provider served no models; add one below".to_owned(),
+            Style::default().fg(theme.warning),
+        )),
+        SelectFetch::Listed => None,
+        SelectFetch::Failed(reason) => Some((
+            format!("Fetch failed: {reason}"),
+            Style::default().fg(theme.warning),
+        )),
+    };
+    // Word-wrap-aware rows; byte math undercounts and clips the failure reason.
+    let rows_of = |text: &str| -> u16 {
+        crate::render::wrapping::word_wrap_line(
+            &Line::from(Span::raw(text.to_owned())),
+            inner_width as usize,
+        )
+        .len() as u16
+    };
+    let msg_height = rows_of(&instruction)
+        + status.as_ref().map_or(0, |(s, _)| rows_of(s))
+        + select.error.as_deref().map_or(0, rows_of);
+    let [
+        _,
+        logo_area,
+        _,
+        msg_area,
+        _,
+        rows_area,
+        _,
+        prompt_area,
+        _,
+        hint_area,
+        _,
+    ] = Layout::vertical([
+        Constraint::Length(top_pad),
+        Constraint::Length(logo_line_count),
+        Constraint::Length(1),
+        // Min: spare rows land here, so a mis-measured wrap never clips.
+        Constraint::Min(msg_height),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(content_area);
+
+    render_logo(logo_area, buf, theme, content_area.height);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            instruction,
+            Style::default().fg(theme.gray_bright),
+        ))
+        .alignment(Alignment::Center),
+    ];
+    if let Some((text, style)) = status {
+        lines.push(Line::from(Span::styled(text, style)).alignment(Alignment::Center));
+    }
+    if let Some(error) = select.error.as_deref() {
+        lines.push(
+            Line::from(Span::styled(error, Style::default().fg(theme.warning)))
+                .alignment(Alignment::Center),
+        );
+    }
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().padding(Padding::horizontal(h_pad)))
+        .render(msg_area, buf);
+
+    let visible = rows_area.height as usize;
+    let start = select
+        .highlight
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(select.rows.len().saturating_sub(visible));
+    let mut row_lines = Vec::new();
+    for (idx, row) in select.rows.iter().enumerate().skip(start).take(visible) {
+        let highlighted = idx == select.highlight;
+        let check = if row.selected { "[x]" } else { "[ ]" };
+        let suffix = if row.manual { " (manual)" } else { "" };
+        let style = if highlighted {
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.gray_bright)
+        };
+        let marker = if highlighted { "› " } else { "  " };
+        row_lines.push(Line::from(Span::styled(
+            format!("{marker}{check} {}{suffix}", row.id),
+            style,
+        )));
+    }
+    Paragraph::new(row_lines)
+        .block(Block::default().padding(Padding::horizontal(h_pad)))
+        .render(rows_area, buf);
+
+    let [_, prompt_centered, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(content_area.width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(prompt_area);
+    render_auth_input_box(
+        prompt_centered,
+        buf,
+        theme,
+        input,
+        "Type a model id and press enter to add",
+        false,
+    );
+
+    let hints = Line::from(vec![
+        Span::styled(
+            "↑↓",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  navigate    ", Style::default().fg(theme.gray)),
+        Span::styled(
+            "space",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  toggle    ", Style::default().fg(theme.gray)),
+        Span::styled(
+            "enter",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  add model / done    ", Style::default().fg(theme.gray)),
+        Span::styled(
+            "esc",
+            Style::default()
+                .fg(theme.accent_user)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  back", Style::default().fg(theme.gray)),
+    ])
+    .alignment(Alignment::Center);
+    Paragraph::new(hints).render(hint_area, buf);
+}
+
 /// Render the auth token input box (loopback mode).
 fn render_auth_input_box(
     area: Rect,
@@ -2197,6 +2391,7 @@ mod tests {
             login_label: None,
             auth_code_input: "",
             custom_entry: &EMPTY_CUSTOM_ENTRY,
+            custom_select: None,
             clipboard_copied: false,
             show_raw_url: false,
             tip: None,
@@ -2409,10 +2604,85 @@ mod tests {
             AuthMode::CustomProviderEntry(step),
             input,
             draft,
+            None,
             false,
             false,
         );
         buffer_text(&buf)
+    }
+
+    fn render_custom_select(
+        select: &crate::app::custom_entry::CustomSelectState,
+        input: &str,
+    ) -> String {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_welcome_authenticating(
+            area,
+            &mut buf,
+            &Theme::current(),
+            logo_line_count(area.height),
+            None,
+            AuthMode::CustomProviderSelect,
+            input,
+            &crate::app::custom_entry::CustomEntryDraft::new(),
+            Some(select),
+            false,
+            false,
+        );
+        buffer_text(&buf)
+    }
+
+    /// The selection screen lists rows, status, and the manual input together.
+    #[test]
+    fn custom_select_arm_lists_rows_status_and_input() {
+        use crate::app::custom_entry::CustomSelectState;
+        use kigi_shell::models::custom::{CustomApi, CustomProvider};
+
+        let provider =
+            CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/v1").unwrap();
+        let mut select = CustomSelectState::new(provider, "sk".to_owned());
+        let fetching = render_custom_select(&select, "");
+        assert!(fetching.contains("Fetching models"), "{fetching}");
+        assert!(fetching.contains("add model / done"), "{fetching}");
+
+        select.apply_fetch(kigi_shell::agent::custom_providers::LoginFetch {
+            provider: select.provider.clone(),
+            model_ids: vec!["m1".to_owned(), "m2".to_owned()],
+        });
+        select.toggle_highlighted();
+        select.add_manual("claude-opus-5-5[1m]");
+        let listed = render_custom_select(&select, "typed-so-far");
+        assert!(listed.contains("[x] m1"), "{listed}");
+        assert!(listed.contains("[ ] m2"), "{listed}");
+        assert!(listed.contains("claude-opus-5-5[1m] (manual)"), "{listed}");
+        assert!(listed.contains("typed-so-far"), "{listed}");
+
+        select.fail_fetch("boom".to_owned());
+        let failed = render_custom_select(&select, "");
+        assert!(failed.contains("Fetch failed: boom"), "{failed}");
+
+        // A two-hop failure reason must render whole, not clip at the wrap.
+        let reason = "https://h.example/models answered HTTP 404; https://h.example/v1/models also failed: https://h.example/v1/models answered HTTP 500";
+        select.fail_fetch(reason.to_owned());
+        let text = render_custom_select(&select, "");
+        assert!(text.contains("Fetch failed:"), "{text}");
+        assert!(text.contains("HTTP 500"), "{text}");
+    }
+
+    /// An empty selection refuses once the fetch resolved.
+    #[test]
+    fn custom_select_arm_shows_the_finish_refusal() {
+        use crate::app::custom_entry::CustomSelectState;
+        use kigi_shell::models::custom::{CustomApi, CustomProvider};
+
+        let provider =
+            CustomProvider::new("gw", CustomApi::OpenAi, "https://h.example/v1").unwrap();
+        let mut select = CustomSelectState::new(provider, "sk".to_owned());
+        select.fail_fetch("boom".to_owned());
+        assert!(select.try_finish().is_none());
+        let text = render_custom_select(&select, "");
+        assert!(text.contains("Select at least one model"), "{text}");
     }
 
     /// Only the key step masks its input.
@@ -2479,6 +2749,7 @@ mod tests {
             // auth_code_input
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             // clipboard_copied
             false,
             // show_raw_url
@@ -3147,6 +3418,7 @@ mod tests {
             // auth_code_input — unused in device mode
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             // clipboard_copied
             false,
             // show_raw_url
@@ -3204,6 +3476,7 @@ mod tests {
             AuthMode::Device,
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             false,
             // show_raw_url
             true,
@@ -3232,6 +3505,7 @@ mod tests {
             AuthMode::Device,
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             false,
             // show_raw_url
             true,
@@ -3271,6 +3545,7 @@ mod tests {
             AuthMode::Device,
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             false,
             // show_raw_url
             true,
@@ -3313,6 +3588,7 @@ mod tests {
             // auth_code_input — unused
             "",
             &crate::app::custom_entry::CustomEntryDraft::new(),
+            None,
             // clipboard_copied
             false,
             // show_raw_url

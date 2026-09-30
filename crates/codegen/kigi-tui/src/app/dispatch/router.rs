@@ -3,7 +3,8 @@ use super::auth::{
     dispatch_begin_custom_provider_entry, dispatch_begin_platform_key_entry, dispatch_cancel_login,
     dispatch_cancel_platform_key_entry, dispatch_login, dispatch_login_with, dispatch_logout,
     dispatch_open_login_picker, dispatch_submit_auth_code, dispatch_submit_custom_provider_input,
-    dispatch_submit_platform_api_key, dispatch_switch_account,
+    dispatch_submit_custom_provider_selection, dispatch_submit_platform_api_key,
+    dispatch_switch_account,
 };
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection,
@@ -894,6 +895,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SubmitCustomProviderInput(input) => {
             dispatch_submit_custom_provider_input(app, input)
         }
+        Action::SubmitCustomProviderSelection => dispatch_submit_custom_provider_selection(app),
         Action::CopyAuthUrl => {
             if let AuthState::Authenticating {
                 auth_url: Some(url),

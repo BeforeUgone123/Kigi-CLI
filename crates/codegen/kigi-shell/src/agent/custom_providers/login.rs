@@ -46,19 +46,32 @@ pub(crate) async fn validate_key(credentialed: &CredentialedProvider) -> Result<
     let provider = &credentialed.provider;
     let url = provider.models_url();
     let client = crate::http::shared_client();
-    let request = match provider.api {
-        CustomApi::OpenAi => client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", credentialed.key())),
-        CustomApi::Anthropic => client
-            .get(&url)
-            .header("x-api-key", credentialed.key())
-            .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
+    let send = |bearer_fallback: bool| {
+        let request = match (provider.api, bearer_fallback) {
+            (CustomApi::OpenAi, _) => client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", credentialed.key())),
+            (CustomApi::Anthropic, false) => client
+                .get(&url)
+                .header("x-api-key", credentialed.key())
+                .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
+            (CustomApi::Anthropic, true) => client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", credentialed.key()))
+                .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
+        };
+        request.send()
     };
-    let response = request
-        .send()
+    let mut response = send(false)
         .await
         .map_err(|e| format!("Couldn't reach {url}: {e}"))?;
+    // Mirrors listing_body: relays may gate the listing on Bearer.
+    if response.status().as_u16() == 401 && provider.api == CustomApi::Anthropic {
+        tracing::info!(provider = %provider.name, "validation 401 with x-api-key; retrying Bearer");
+        response = send(true)
+            .await
+            .map_err(|e| format!("Couldn't reach {url}: {e}"))?;
+    }
     let status = response.status().as_u16();
     match status {
         200..=299 => Ok(()),
@@ -132,6 +145,29 @@ mod tests {
             .await;
         let base = format!("{}/v1", server.uri());
         validate_key(&credentialed(CustomApi::Anthropic, &base, "sk-anthropic"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_falls_back_to_bearer_for_anthropic_relays() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("x-api-key", "sk-gw"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer sk-gw"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+        validate_key(&credentialed(CustomApi::Anthropic, &base, "sk-gw"))
             .await
             .unwrap();
     }

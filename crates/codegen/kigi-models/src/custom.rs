@@ -165,6 +165,18 @@ pub fn normalize_base_url(raw: &str) -> Result<String, CustomProviderError> {
     Ok(url.to_owned())
 }
 
+/// A manually added model id: no whitespace, no controls, bounded length.
+pub fn validate_model_id(id: &str) -> Result<(), CustomProviderError> {
+    let err = |reason: &str| Err(CustomProviderError::Name(reason.to_owned()));
+    if id.is_empty() || id.len() > 128 {
+        return err("model id must be 1 to 128 characters");
+    }
+    if id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return err("model id must not contain whitespace");
+    }
+    Ok(())
+}
+
 /// A valid provider name derived from a host.
 pub fn default_name(base_url: &str) -> String {
     let host = base_url

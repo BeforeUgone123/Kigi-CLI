@@ -1756,6 +1756,23 @@ pub struct WireThinkEfforts {
     pub default_effort: Option<String>,
 }
 
+impl WireModel {
+    /// An id-only model, as if the listing served no metadata.
+    pub fn bare(id: String) -> Self {
+        Self {
+            id,
+            context_length: 0,
+            supports_reasoning: false,
+            supports_image_in: false,
+            supports_video_in: false,
+            display_name: None,
+            max_output_tokens: 0,
+            supports_thinking_type: None,
+            think_efforts: None,
+        }
+    }
+}
+
 /// `GET {base}/models` response envelope.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WireModelsResponse {

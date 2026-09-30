@@ -7,11 +7,14 @@ use crate::agent::config::{PlatformCredentialConfig, PlatformsConfig};
 mod fetch;
 mod login;
 mod save;
+mod selection;
 
+pub use fetch::{LoginFetch, fetch_listing_for_login};
 pub(crate) use fetch::{drop_orphans, fetch_models_blocking, stamp_credentials};
 pub(crate) use login::validate_key;
 pub use login::{login_method_id, login_provider_name, picker_api, picker_methods};
 pub use save::save_custom_provider;
+pub(crate) use selection::{filter_unselected, synthesize_selected};
 
 /// Tables setting `base_url` or `api`, valid or not.
 fn declarations(platforms: &PlatformsConfig) -> Vec<(&str, Result<CustomProvider, String>)> {

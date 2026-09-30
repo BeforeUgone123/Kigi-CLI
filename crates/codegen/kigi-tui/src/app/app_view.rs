@@ -264,6 +264,8 @@ pub enum AuthMode {
     ApiKeyEntry(PlatformLogin),
     /// Custom provider login, one field per step.
     CustomProviderEntry(crate::app::custom_entry::CustomEntryStep),
+    /// Custom provider login, the model-selection screen.
+    CustomProviderSelect,
 }
 /// API-key platform login target, selected from the welcome picker. Wraps a
 /// non-OAuth registry platform ([`kigi_shell::models::PlatformId`]);
@@ -924,6 +926,8 @@ pub struct AppView {
     pub auth_code_input: String,
     /// Values collected by the custom provider login steps.
     pub custom_entry: crate::app::custom_entry::CustomEntryDraft,
+    /// Model-selection state of a custom provider login; present in that mode.
+    pub custom_select: Option<crate::app::custom_entry::CustomSelectState>,
     /// Monotonically increasing sequence number for auth requests.
     pub next_auth_request_seq: u64,
     /// Every session/chat/worktree/prompt action deferred behind startup gates.
@@ -1128,6 +1132,7 @@ impl AppView {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
             custom_entry: Default::default(),
+            custom_select: None,
             next_auth_request_seq: 1,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -1663,6 +1668,7 @@ impl AppView {
                     mid_session_login: self.auth_return_view.is_some(),
                     auth_methods: &self.auth_methods,
                     auth_code_input: &mut self.auth_code_input,
+                    custom_select: &mut self.custom_select,
                     prompt: &mut self.welcome_prompt,
                     prompt_focused: &mut self.welcome_prompt_focused,
                     new_worktree_dialog: &mut self.new_worktree_dialog,
@@ -2188,6 +2194,7 @@ struct WelcomeInputCtx<'a> {
     /// the `AuthState::Pending` welcome menu.
     auth_methods: &'a [acp::AuthMethod],
     auth_code_input: &'a mut String,
+    custom_select: &'a mut Option<crate::app::custom_entry::CustomSelectState>,
     prompt: &'a mut PromptWidget,
     prompt_focused: &'a mut bool,
     new_worktree_dialog: &'a mut Option<NewWorktreeDialogState>,
@@ -2713,6 +2720,70 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 }
             }
             AuthState::Authenticating {
+                mode: AuthMode::CustomProviderSelect,
+                ..
+            } => {
+                // Esc cancels back to the picker, like the entry steps.
+                if key!(Esc).matches(key) {
+                    return InputOutcome::Action(Action::CancelPlatformKeyEntry);
+                }
+                if key!('q', CONTROL).matches(key) || key!('c', CONTROL).matches(key) {
+                    if ctx.mid_session_login {
+                        return InputOutcome::Action(Action::CancelLogin);
+                    }
+                    return InputOutcome::Action(Action::QuitConfirmed);
+                }
+                let Some(select) = ctx.custom_select.as_mut() else {
+                    return InputOutcome::Unchanged;
+                };
+                if key!(Up).matches(key) {
+                    select.move_highlight(-1);
+                    return InputOutcome::Changed;
+                }
+                if key!(Down).matches(key) {
+                    select.move_highlight(1);
+                    return InputOutcome::Changed;
+                }
+                // Model ids hold no spaces, so the spacebar toggles rows.
+                if key!(Char(' ')).matches(key) {
+                    select.toggle_highlighted();
+                    return InputOutcome::Changed;
+                }
+                if crate::input::key::is_paste_key(key)
+                    || crate::input::key::is_inline_paste_key(key)
+                {
+                    if let Some(text) = crate::clipboard::system_clipboard_get() {
+                        let cleaned: String =
+                            text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                        ctx.auth_code_input.push_str(&cleaned);
+                        return InputOutcome::Changed;
+                    }
+                    crate::clipboard::log_paste_key_empty_host_clipboard("auth input");
+                    return InputOutcome::Unchanged;
+                }
+                if key!(Enter).matches(key) {
+                    let trimmed = ctx.auth_code_input.trim().to_string();
+                    if trimmed.is_empty() {
+                        return InputOutcome::Action(Action::SubmitCustomProviderSelection);
+                    }
+                    select.add_manual(&trimmed);
+                    if select.error.is_none() {
+                        ctx.auth_code_input.clear();
+                    }
+                    return InputOutcome::Changed;
+                }
+                if key!(Backspace).matches(key) {
+                    ctx.auth_code_input.pop();
+                    return InputOutcome::Changed;
+                }
+                if let crossterm::event::KeyCode::Char(c) = key.code
+                    && crate::input::key::is_text_input_key(key)
+                {
+                    ctx.auth_code_input.push(c);
+                    return InputOutcome::Changed;
+                }
+            }
+            AuthState::Authenticating {
                 mode: AuthMode::Loopback,
                 ..
             } => {
@@ -2775,7 +2846,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             AuthState::Authenticating {
                 mode:
-                    AuthMode::Loopback | AuthMode::ApiKeyEntry(_) | AuthMode::CustomProviderEntry(_),
+                    AuthMode::Loopback
+                    | AuthMode::ApiKeyEntry(_)
+                    | AuthMode::CustomProviderEntry(_)
+                    | AuthMode::CustomProviderSelect,
                 ..
             } => {
                 let cleaned: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
@@ -3276,6 +3350,7 @@ impl AppView {
                             login_label: self.login_label.as_deref(),
                             auth_code_input: &self.auth_code_input,
                             custom_entry: &self.custom_entry,
+                            custom_select: self.custom_select.as_ref(),
                             clipboard_copied: self.auth_clipboard_copied,
                             show_raw_url: self.auth_show_raw_url,
                             tip,
@@ -4412,6 +4487,7 @@ pub(crate) mod tests {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: String::new(),
             custom_entry: Default::default(),
+            custom_select: None,
             next_auth_request_seq: 1,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -7632,12 +7708,24 @@ pub(crate) mod tests {
     /// Ctrl+V / Super+V paste the host clipboard into every auth input.
     #[test]
     fn auth_inputs_paste_key_chords_insert_clipboard_text() {
+        let select_state = || {
+            crate::app::custom_entry::CustomSelectState::new(
+                kigi_shell::models::custom::CustomProvider::new(
+                    "gw",
+                    kigi_shell::models::custom::CustomApi::OpenAi,
+                    "https://h.example/v1",
+                )
+                .unwrap(),
+                "sk".to_owned(),
+            )
+        };
         let modes = [
             AuthMode::Loopback,
             AuthMode::ApiKeyEntry(PlatformLogin(kigi_shell::models::PlatformId::MoonshotCn)),
             AuthMode::CustomProviderEntry(crate::app::custom_entry::CustomEntryStep::first(
                 kigi_shell::models::custom::CustomApi::OpenAi,
             )),
+            AuthMode::CustomProviderSelect,
         ];
         for mode in modes {
             for mods in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
@@ -7648,12 +7736,13 @@ pub(crate) mod tests {
                     auth_url: None,
                     mode,
                 };
-                crate::clipboard::set_clipboard_probe_hook(
-                    crate::clipboard::ClipboardProbeHook {
-                        text: Some("sk-pasted\nkey".to_owned()),
-                        ..Default::default()
-                    },
-                );
+                if matches!(mode, AuthMode::CustomProviderSelect) {
+                    app.custom_select = Some(select_state());
+                }
+                crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+                    text: Some("sk-pasted\nkey".to_owned()),
+                    ..Default::default()
+                });
                 let outcome = app.handle_input(&key_event(KeyCode::Char('v'), mods));
                 crate::clipboard::clear_clipboard_probe_hook();
                 assert!(

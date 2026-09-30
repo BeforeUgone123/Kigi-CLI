@@ -282,6 +282,7 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     app.auth_state = AuthState::Done;
     app.auth_show_raw_url = false;
     app.auth_code_input.clear();
+    app.custom_select = None;
     app.auth_in_flight_method = None;
     restore_auth_return_view(app, return_view);
     // The user bailed out of re-auth — drop stashed prompts and strip the
@@ -335,6 +336,7 @@ pub(super) fn dispatch_begin_custom_provider_entry(
     app.next_auth_request_seq += 1;
     app.auth_code_input.clear();
     app.custom_entry.clear();
+    app.custom_select = None;
     app.auth_state = AuthState::Authenticating {
         request_seq,
         handle: None,
@@ -373,24 +375,101 @@ pub(super) fn dispatch_submit_custom_provider_input(
             vec![]
         }
         CustomEntryOutcome::Done { provider, key } => {
-            app.auth_in_flight_method = Some(kigi_shell::agent::custom_providers::login_method_id(
-                &provider.name,
-            ));
+            // Key accepted: open the model selection and fetch concurrently.
             app.custom_entry.clear();
             app.auth_code_input.clear();
+            app.custom_select = Some(crate::app::custom_entry::CustomSelectState::new(
+                provider.clone(),
+                key.clone(),
+            ));
             app.auth_state = AuthState::Authenticating {
                 request_seq,
                 handle: None,
                 auth_url: None,
-                mode: AuthMode::Pending,
+                mode: AuthMode::CustomProviderSelect,
             };
-            vec![Effect::PersistCustomProviderAndAuthenticate {
+            vec![Effect::FetchCustomProviderModels {
                 request_seq,
                 provider,
                 key,
             }]
         }
     }
+}
+
+/// Enter on an empty manual-model box: persist the chosen models, then auth.
+pub(super) fn dispatch_submit_custom_provider_selection(app: &mut AppView) -> Vec<Effect> {
+    let request_seq = match &app.auth_state {
+        AuthState::Authenticating {
+            request_seq,
+            mode: AuthMode::CustomProviderSelect,
+            ..
+        } => *request_seq,
+        _ => return vec![],
+    };
+    complete_custom_provider_selection(app, request_seq)
+}
+
+/// Persists the selection once the listing no longer gates the base URL.
+fn complete_custom_provider_selection(app: &mut AppView, request_seq: u64) -> Vec<Effect> {
+    let Some(state) = app.custom_select.as_mut() else {
+        return vec![];
+    };
+    let Some(models) = state.try_finish() else {
+        return vec![];
+    };
+    let state = app.custom_select.take().expect("checked above");
+    let provider = state.provider.clone();
+    let key = state.take_key();
+    app.auth_in_flight_method = Some(kigi_shell::agent::custom_providers::login_method_id(
+        &provider.name,
+    ));
+    app.auth_code_input.clear();
+    app.auth_state = AuthState::Authenticating {
+        request_seq,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    vec![Effect::PersistCustomProviderAndAuthenticate {
+        request_seq,
+        provider,
+        key,
+        models,
+    }]
+}
+
+/// The login-step model listing came back; fill or flag the selection.
+pub(super) fn handle_custom_provider_models_listed(
+    app: &mut AppView,
+    request_seq: u64,
+    result: Result<kigi_shell::agent::custom_providers::LoginFetch, String>,
+) -> Vec<Effect> {
+    let in_flight = matches!(
+        &app.auth_state,
+        AuthState::Authenticating {
+            request_seq: current_seq,
+            mode: AuthMode::CustomProviderSelect,
+            ..
+        } if *current_seq == request_seq
+    );
+    if !in_flight {
+        return vec![];
+    }
+    match (app.custom_select.as_mut(), result) {
+        (Some(state), Ok(fetch)) => state.apply_fetch(fetch),
+        (Some(state), Err(reason)) => state.fail_fetch(reason),
+        (None, _) => {}
+    }
+    // A finish pressed during the fetch completes now, with the adopted base.
+    if app
+        .custom_select
+        .as_ref()
+        .is_some_and(|s| s.finish_requested)
+    {
+        return complete_custom_provider_selection(app, request_seq);
+    }
+    vec![]
 }
 
 /// Esc in the API-key paste box: back to the login picker (no error line).
@@ -400,7 +479,9 @@ pub(super) fn dispatch_cancel_platform_key_entry(app: &mut AppView) -> Vec<Effec
     if !matches!(
         app.auth_state,
         AuthState::Authenticating {
-            mode: AuthMode::ApiKeyEntry(_) | AuthMode::CustomProviderEntry(_),
+            mode: AuthMode::ApiKeyEntry(_)
+                | AuthMode::CustomProviderEntry(_)
+                | AuthMode::CustomProviderSelect,
             ..
         }
     ) {
@@ -409,6 +490,7 @@ pub(super) fn dispatch_cancel_platform_key_entry(app: &mut AppView) -> Vec<Effec
     app.next_auth_request_seq += 1;
     app.auth_code_input.clear();
     app.custom_entry.clear();
+    app.custom_select = None;
     app.auth_state = AuthState::Pending { error: None };
     vec![]
 }

@@ -13,37 +13,169 @@ pub(crate) fn fetch_models_blocking(
     credentialed: &CredentialedProvider,
 ) -> Result<Vec<ModelEntryConfig>, BackendError> {
     let provider = &credentialed.provider;
-    let url = provider.models_url();
-    tracing::info!(provider = %provider.name, api = provider.api.as_str(), %url, "fetching custom provider models");
-    let client = crate::http::shared_blocking_client();
-    let request = match provider.api {
-        CustomApi::OpenAi => client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", credentialed.key())),
-        CustomApi::Anthropic => client
-            .get(&url)
-            .header("x-api-key", credentialed.key())
-            .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
-    };
-    let response = request.send()?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response.text().unwrap_or_default();
-        return Err(BackendError::RequestFailed { status, body });
-    }
-    let body = response.text()?;
-    let listing = match provider.api {
-        CustomApi::OpenAi => kigi_models::parse_openai_listing(&body),
-        CustomApi::Anthropic => kigi_models::parse_anthropic_listing(&body),
-    };
-    let wire = listing.map_err(|e| BackendError::RequestFailed {
+    tracing::info!(provider = %provider.name, api = provider.api.as_str(), url = %provider.models_url(), "fetching custom provider models");
+    let body = listing_body(provider, credentialed.key())?;
+    let wire = parse_listing(provider, &body).map_err(|e| BackendError::RequestFailed {
+        // No error content: serde quotes the offending value, a reflected key risk.
         status: 200,
-        body: format!("{} listing parse failed: {e}", provider.api.as_str()),
+        body: format!(
+            "{} listing parse failed at line {} column {}",
+            provider.api.as_str(),
+            e.line(),
+            e.column()
+        ),
     })?;
     if wire.is_empty() {
         tracing::warn!(provider = %provider.name, "custom provider listed no models");
     }
     Ok(wire.into_iter().map(|w| entry(provider, w)).collect())
+}
+
+/// The listing GET with the dialect's key header; status-gated body.
+fn listing_body(provider: &CustomProvider, key: &str) -> Result<String, BackendError> {
+    let url = provider.models_url();
+    let client = crate::http::shared_blocking_client();
+    let send = |bearer_fallback: bool| {
+        let request = match (provider.api, bearer_fallback) {
+            (CustomApi::OpenAi, _) => client
+                .get(&url)
+                .header("Authorization", format!("Bearer {key}")),
+            (CustomApi::Anthropic, false) => client
+                .get(&url)
+                .header("x-api-key", key)
+                .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
+            (CustomApi::Anthropic, true) => client
+                .get(&url)
+                .header("Authorization", format!("Bearer {key}"))
+                .header("anthropic-version", kigi_sampling_types::ANTHROPIC_VERSION),
+        };
+        request.send()
+    };
+    let mut response = send(false)?;
+    // Relays may gate the listing on Bearer even for the Messages wire.
+    if response.status().as_u16() == 401 && provider.api == CustomApi::Anthropic {
+        tracing::info!(provider = %provider.name, "listing 401 with x-api-key; retrying Bearer");
+        response = send(true)?;
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        return Err(BackendError::RequestFailed { status, body });
+    }
+    Ok(response.text()?)
+}
+
+fn parse_listing(
+    provider: &CustomProvider,
+    body: &str,
+) -> Result<Vec<WireModel>, serde_json::Error> {
+    match provider.api {
+        CustomApi::OpenAi => kigi_models::parse_openai_listing(body),
+        CustomApi::Anthropic => kigi_models::parse_anthropic_listing(body),
+    }
+}
+
+/// The login-step listing result; `provider` carries the adopted base URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginFetch {
+    pub provider: CustomProvider,
+    pub model_ids: Vec<String>,
+}
+
+/// Login listing fetch; probes `{base}/v1` once on a 404 or unparsable body and adopts it.
+pub fn fetch_listing_for_login(provider: &CustomProvider, key: &str) -> Result<LoginFetch, String> {
+    match list_wire(provider, key) {
+        Ok(model_ids) => Ok(LoginFetch {
+            provider: provider.clone(),
+            model_ids,
+        }),
+        Err(first) => {
+            if !first.retryable() || has_version_tail(&provider.base_url) {
+                return Err(first.into_message());
+            }
+            let probed = CustomProvider::new(
+                &provider.name,
+                provider.api,
+                &format!("{}/v1", provider.base_url),
+            )
+            .map_err(|e| e.to_string())?;
+            tracing::info!(
+                provider = %provider.name,
+                base_url = %probed.base_url,
+                "custom provider listing retrying with a /v1 base"
+            );
+            match list_wire(&probed, key) {
+                Ok(model_ids) => Ok(LoginFetch {
+                    provider: probed,
+                    model_ids,
+                }),
+                Err(second) => Err(format!(
+                    "{}; {} also failed: {}",
+                    first.into_message(),
+                    probed.models_url(),
+                    second.into_message()
+                )),
+            }
+        }
+    }
+}
+
+/// A listing failure; `retryable` marks wrong-base-URL shapes only.
+enum ListFail {
+    Retryable(String),
+    Fatal(String),
+}
+
+impl ListFail {
+    fn retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            Self::Retryable(m) | Self::Fatal(m) => m,
+        }
+    }
+}
+
+fn list_wire(provider: &CustomProvider, key: &str) -> Result<Vec<String>, ListFail> {
+    let url = provider.models_url();
+    let body = listing_body(provider, key).map_err(|e| match &e {
+        BackendError::RequestFailed { status, .. } => {
+            // No body: a reflected error could echo the key.
+            let msg = format!("{url} answered HTTP {status}");
+            if *status == 404 {
+                ListFail::Retryable(msg)
+            } else {
+                ListFail::Fatal(msg)
+            }
+        }
+        BackendError::Network(_) => ListFail::Fatal(format!("Couldn't reach {url}: {e}")),
+        BackendError::Auth(_) => ListFail::Fatal(e.to_string()),
+    })?;
+    let wire = parse_listing(provider, &body).map_err(|e| {
+        ListFail::Retryable(format!(
+            "{url} did not serve a {} model listing (invalid JSON at line {} column {})",
+            provider.api.as_str(),
+            e.line(),
+            e.column()
+        ))
+    })?;
+    Ok(wire.into_iter().map(|w| w.id).collect())
+}
+
+/// True when the base URL's last path segment is a version like `v1`.
+fn has_version_tail(base_url: &str) -> bool {
+    let Some(tail) = base_url.rsplit('/').next() else {
+        return false;
+    };
+    let digits = tail.strip_prefix('v').unwrap_or("");
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A selected id the listing never served becomes an entry with wire defaults.
+pub(crate) fn manual_entry(provider: &CustomProvider, id: &str) -> ModelEntryConfig {
+    entry(provider, WireModel::bare(id.to_owned()))
 }
 
 fn entry(provider: &CustomProvider, wire: WireModel) -> ModelEntryConfig {
@@ -129,6 +261,133 @@ mod tests {
             .unwrap()
     }
 
+    async fn login_fetch_on_thread(
+        provider: CustomProvider,
+        key: &str,
+    ) -> Result<LoginFetch, String> {
+        let key = key.to_owned();
+        tokio::task::spawn_blocking(move || fetch_listing_for_login(&provider, &key))
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn version_tail_detection() {
+        assert!(has_version_tail("https://h.example/v1"));
+        assert!(has_version_tail("https://h.example/api/v2"));
+        assert!(!has_version_tail("https://h.example"));
+        assert!(!has_version_tail("https://h.example/coding"));
+        assert!(!has_version_tail("https://h.example/v"));
+        assert!(!has_version_tail("https://h.example/v1x"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_fetch_returns_the_served_ids() {
+        let server = MockServer::start().await;
+        Mock::given(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "m1"}, {"id": "m2"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &base).unwrap();
+
+        let fetch = login_fetch_on_thread(provider, "sk-k").await.unwrap();
+
+        assert_eq!(fetch.provider.base_url, base);
+        assert_eq!(fetch.model_ids, ["m1", "m2"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_fetch_probes_v1_on_a_404_and_adopts_the_base() {
+        let server = MockServer::start().await;
+        Mock::given(path("/coding/models"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/coding/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "m1"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/coding", server.uri());
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &base).unwrap();
+
+        let fetch = login_fetch_on_thread(provider, "sk-k").await.unwrap();
+
+        assert_eq!(fetch.provider.base_url, format!("{base}/v1"));
+        assert_eq!(fetch.model_ids, ["m1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_fetch_probes_v1_when_the_200_body_is_not_a_listing() {
+        // A WAF answers every path with an HTML challenge page at HTTP 200.
+        let server = MockServer::start().await;
+        Mock::given(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>challenge</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "m1"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &server.uri()).unwrap();
+
+        let fetch = login_fetch_on_thread(provider, "sk-k").await.unwrap();
+
+        assert_eq!(fetch.provider.base_url, format!("{}/v1", server.uri()));
+        assert_eq!(fetch.model_ids, ["m1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_fetch_does_not_probe_auth_failures_or_versioned_bases() {
+        let server = MockServer::start().await;
+        Mock::given(path("/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &server.uri()).unwrap();
+        let err = login_fetch_on_thread(provider, "bad").await.unwrap_err();
+        assert!(err.contains("401"), "{err}");
+
+        let server = MockServer::start().await;
+        Mock::given(path("/v2/models"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v2", server.uri());
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &base).unwrap();
+        let err = login_fetch_on_thread(provider, "sk-k").await.unwrap_err();
+        assert!(err.contains("404") && !err.contains("also failed"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_fetch_reports_both_hops_when_the_probe_fails_too() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = CustomProvider::new("proxy", CustomApi::OpenAi, &server.uri()).unwrap();
+
+        let err = login_fetch_on_thread(provider, "sk-k").await.unwrap_err();
+
+        assert!(err.contains("also failed"), "{err}");
+        assert!(!err.contains("sk-k"), "{err}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn openai_listing_becomes_chat_completions_entries() {
         let server = MockServer::start().await;
@@ -202,6 +461,54 @@ mod tests {
         assert_eq!(m.max_completion_tokens, Some(64_000));
         assert_eq!(m.api_backend, crate::sampling::ApiBackend::Messages);
         assert_eq!(m.auth_scheme, Some(kigi_sampler::AuthScheme::XApiKey));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn anthropic_listing_falls_back_to_bearer_on_a_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("x-api-key", "sk-gw"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer sk-gw"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "c1"}], "has_more": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+
+        let models = fetch_on_thread(credentialed("gw", CustomApi::Anthropic, &base, "sk-gw"))
+            .await
+            .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id.as_deref(), Some("gw/c1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn openai_listing_never_retries_on_a_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/v1", server.uri());
+        let err = fetch_on_thread(credentialed("proxy", CustomApi::OpenAi, &base, "bad"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::RequestFailed { status: 401, .. }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]

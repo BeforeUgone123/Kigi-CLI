@@ -127,6 +127,7 @@ fn test_app() -> AppView {
         auth_start_mode: AuthMode::Pending,
         auth_code_input: String::new(),
         custom_entry: Default::default(),
+        custom_select: None,
         next_auth_request_seq: 1,
         deferred_startup: Default::default(),
         auth_use_oauth: false,

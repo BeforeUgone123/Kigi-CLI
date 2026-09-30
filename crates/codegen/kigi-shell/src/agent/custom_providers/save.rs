@@ -4,9 +4,14 @@ use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 
 /// Writes `[platforms.<name>]` to config.toml and the key to auth.json.
-pub async fn save_custom_provider(provider: &CustomProvider, api_key: &str) -> Result<()> {
+pub async fn save_custom_provider(
+    provider: &CustomProvider,
+    api_key: &str,
+    models: &[String],
+) -> Result<()> {
     let provider = provider.clone();
     let api_key = api_key.to_owned();
+    let models = models.to_owned();
     let _guard = crate::util::config::SAVE_LOCK.lock().await;
     tokio::task::spawn_blocking(move || {
         save_custom_provider_in(
@@ -14,6 +19,7 @@ pub async fn save_custom_provider(provider: &CustomProvider, api_key: &str) -> R
             &crate::util::kigi_home::kigi_home(),
             &provider,
             &api_key,
+            &models,
         )
     })
     .await
@@ -26,6 +32,7 @@ pub(crate) fn save_custom_provider_in(
     kigi_home: &std::path::Path,
     provider: &CustomProvider,
     api_key: &str,
+    models: &[String],
 ) -> Result<()> {
     let api_key = api_key.trim();
     anyhow::ensure!(!api_key.is_empty(), "API key must not be empty");
@@ -37,7 +44,7 @@ pub(crate) fn save_custom_provider_in(
             config_path.display()
         )
     })?;
-    upsert_definition(&mut root, provider)?;
+    upsert_definition(&mut root, provider, models)?;
     let dest = crate::util::config::config_write_dest(config_path)?;
     crate::util::config::atomic_write_string(&dest, &toml::to_string_pretty(&root)?)
         .with_context(|| format!("writing {}", dest.display()))?;
@@ -47,12 +54,17 @@ pub(crate) fn save_custom_provider_in(
         provider = %provider.name,
         api = provider.api.as_str(),
         base_url = %provider.base_url,
+        models = models.len(),
         "custom provider saved"
     );
     Ok(())
 }
 
-fn upsert_definition(root: &mut TomlValue, provider: &CustomProvider) -> Result<()> {
+fn upsert_definition(
+    root: &mut TomlValue,
+    provider: &CustomProvider,
+    models: &[String],
+) -> Result<()> {
     let top = root
         .as_table_mut()
         .ok_or_else(|| anyhow!("config root is not a table"))?;
@@ -68,6 +80,15 @@ fn upsert_definition(root: &mut TomlValue, provider: &CustomProvider) -> Result<
         .ok_or_else(|| anyhow!("[platforms.{}] is not a table", provider.name))?;
     entry.insert("api".into(), provider.api.as_str().into());
     entry.insert("base_url".into(), provider.base_url.as_str().into());
+    entry.insert(
+        "models".into(),
+        TomlValue::Array(
+            models
+                .iter()
+                .map(|m| TomlValue::String(m.clone()))
+                .collect(),
+        ),
+    );
     Ok(())
 }
 
@@ -91,7 +112,7 @@ mod tests {
         .unwrap();
         let p = provider("proxy", CustomApi::OpenAi, "https://h.example/v1/");
 
-        save_custom_provider_in(&config, dir.path(), &p, "  sk-new  ").unwrap();
+        save_custom_provider_in(&config, dir.path(), &p, "  sk-new  ", &["m1".to_owned()]).unwrap();
 
         let saved: TomlValue = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         assert_eq!(saved["ui"]["theme"].as_str(), Some("kiginight"));
@@ -103,6 +124,10 @@ mod tests {
         assert_eq!(entry["api"].as_str(), Some("openai"));
         assert_eq!(entry["base_url"].as_str(), Some("https://h.example/v1"));
         assert_eq!(entry["api_key"].as_str(), Some("hand-written"));
+        assert_eq!(
+            entry["models"].as_array().unwrap(),
+            &[TomlValue::String("m1".into())]
+        );
         let stored = crate::auth::read_auth_json(&dir.path().join("auth.json")).unwrap();
         assert_eq!(stored["proxy"].key, "sk-new");
     }
@@ -116,6 +141,7 @@ mod tests {
             dir.path(),
             &provider("gw", CustomApi::OpenAi, "https://a.example/v1"),
             "k1",
+            &["a1".to_owned()],
         )
         .unwrap();
         save_custom_provider_in(
@@ -123,6 +149,7 @@ mod tests {
             dir.path(),
             &provider("gw", CustomApi::Anthropic, "https://b.example/v1"),
             "k2",
+            &["b1".to_owned()],
         )
         .unwrap();
 
@@ -131,6 +158,10 @@ mod tests {
         assert_eq!(
             saved["platforms"]["gw"]["base_url"].as_str(),
             Some("https://b.example/v1")
+        );
+        assert_eq!(
+            saved["platforms"]["gw"]["models"].as_array().unwrap(),
+            &[TomlValue::String("b1".into())]
         );
         let stored = crate::auth::read_auth_json(&dir.path().join("auth.json")).unwrap();
         assert_eq!(stored["gw"].key, "k2");
@@ -142,12 +173,12 @@ mod tests {
         let config = dir.path().join("config.toml");
         let p = provider("proxy", CustomApi::OpenAi, "https://h.example/v1");
 
-        assert!(save_custom_provider_in(&config, dir.path(), &p, "  ").is_err());
+        assert!(save_custom_provider_in(&config, dir.path(), &p, "  ", &[]).is_err());
         assert!(!config.exists());
         assert!(!dir.path().join("auth.json").exists());
 
         std::fs::write(&config, "[platforms\nnope").unwrap();
-        let err = save_custom_provider_in(&config, dir.path(), &p, "sk").unwrap_err();
+        let err = save_custom_provider_in(&config, dir.path(), &p, "sk", &[]).unwrap_err();
         assert!(err.to_string().contains("unparseable"), "{err}");
         assert_eq!(
             std::fs::read_to_string(&config).unwrap(),
@@ -162,7 +193,7 @@ mod tests {
         let config = dir.path().join("config.toml");
         std::fs::write(&config, "platforms = \"x\"\n").unwrap();
         let p = provider("proxy", CustomApi::OpenAi, "https://h.example/v1");
-        let err = save_custom_provider_in(&config, dir.path(), &p, "sk").unwrap_err();
+        let err = save_custom_provider_in(&config, dir.path(), &p, "sk", &[]).unwrap_err();
         assert!(err.to_string().contains("not a table"), "{err}");
         assert!(!dir.path().join("auth.json").exists());
     }

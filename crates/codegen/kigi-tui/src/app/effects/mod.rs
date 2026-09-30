@@ -1915,13 +1915,15 @@ pub(crate) fn execute(
             request_seq,
             provider,
             key,
+            models,
         } => {
             let tx = acp_tx.clone();
             let abort_handle = tasks.spawn(async move {
                 // Persist first so authenticate finds the definition and key.
-                if let Err(e) =
-                    kigi_shell::agent::custom_providers::save_custom_provider(&provider, &key)
-                        .await
+                if let Err(e) = kigi_shell::agent::custom_providers::save_custom_provider(
+                    &provider, &key, &models,
+                )
+                .await
                 {
                     let error = format!("Couldn't save the provider: {e:#}");
                     ulog::error(
@@ -1939,6 +1941,23 @@ pub(crate) fn execute(
                 send_authenticate(&tx, request_seq, method_id, false, false).await
             });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
+        }
+        Effect::FetchCustomProviderModels {
+            request_seq,
+            provider,
+            key,
+        } => {
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    kigi_shell::agent::custom_providers::fetch_listing_for_login(&provider, &key)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("listing task failed: {e}")));
+                TaskResult::CustomProviderModelsListed {
+                    request_seq,
+                    result,
+                }
+            });
         }
         Effect::SubmitAuthCode { request_seq, code } => {
             let tx = acp_tx.clone();

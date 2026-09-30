@@ -485,8 +485,27 @@ client-side, no backend surface.
   instead of `x-api-key` (this also repaired `anthropic` and `minimax`).
   Login: picker rows `custom-openai` / `custom-anthropic` are not loginable
   (`AuthMethodKind::Unknown`); the TUI asks base URL, name (default from the
-  host), key, then `save_custom_provider` writes config.toml (through
-  `config_write_dest`) and auth.json, and `authenticate("custom:<name>")`
+  host), key, then opens a MODEL-SELECTION screen (`custom_entry.rs`
+  `CustomSelectState`, welcome `AuthMode::CustomProviderSelect`): the listing
+  fetch (`fetch_listing_for_login`) runs concurrently with the manual-id input
+  — both visible at once, failure shows its reason — space toggles fetched
+  rows, enter adds a typed id or finishes (a finish pressed mid-fetch waits for
+  it: `finish_requested`), and the chosen ids persist as `[platforms.<name>]
+  models = [...]` via `save_custom_provider`. The listing fetch probes
+  `{base}/v1` once when `{base}/models` 404s or answers unparsable (a WAF
+  challenge is HTTP 200 HTML) and the base has no `/vN` tail, adopting the
+  probed base for the saved definition; anthropic-wire listings that 401 on
+  `x-api-key` retry once with `Bearer` (relays gate `GET /models` on Bearer
+  while `/messages` takes `x-api-key`); listing errors never quote response
+  content (line/column only — a reflected body could carry the key). Catalog
+  assembly honors the allowlist in `selection.rs`: `synthesize_selected` (BEFORE
+  `[model.*]` overrides, so an override composes with a synthesized entry)
+  builds wire-default entries for selected ids the listing never served, and
+  `filter_unselected` (AFTER overrides) is authoritative in the provider's
+  namespace — even a `[model."name/x"]` entry for an unselected id is dropped.
+  Provider-owned entries never take donor `api_backend` inheritance in
+  `resolve_model_list` (the declared wire wins); no `models` key = the whole
+  listing (the declarative path). `authenticate("custom:<name>")` then
   validates `GET {base}/models` (401/403 = rejected key, other non-2xx and network
   errors surface). Limits: context window 256K unless the listing serves
   `context_length` (Anthropic: `max_input_tokens`); no models.dev enrichment; a
