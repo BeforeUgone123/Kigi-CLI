@@ -476,8 +476,9 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        external_agent: args.external_agent.clone(),
     };
-    let connection = if use_leader {
+    let connection = if use_leader && connect_flags.external_agent.is_none() {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
         tracing::info!(
             elapsed_ms = startup_start.elapsed().as_millis() as u64,
@@ -485,6 +486,9 @@ pub async fn run(
         );
         conn
     } else {
+        if use_leader {
+            eprintln!("warning: --external-agent overrides leader mode");
+        }
         let conn = crate::acp::connect(&cancel, connect_flags).await?;
         tracing::info!(
             elapsed_ms = startup_start.elapsed().as_millis() as u64,

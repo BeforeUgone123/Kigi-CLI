@@ -643,6 +643,16 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
+    /// Spawn an external ACP agent command as the agent backend instead of
+    /// the built-in kigi agent (e.g. `"devin acp"`, `"kimi --acp"`). The
+    /// command is shell-split and must speak ACP JSON-RPC over
+    /// newline-delimited stdio. Overrides leader mode.
+    #[arg(
+        long = "external-agent",
+        value_name = "COMMAND",
+        env = "KIGI_EXTERNAL_AGENT"
+    )]
+    pub external_agent: Option<String>,
     /// Initial prompt for the interactive session, e.g. `kigi "fix the bug"` or `kigi --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",

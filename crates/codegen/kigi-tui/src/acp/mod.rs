@@ -3,6 +3,7 @@
 //! Handles spawning the agent process, initializing the protocol,
 //! authenticating, and providing the channel for communication.
 
+pub mod external;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
@@ -139,6 +140,10 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Spawn this external ACP agent command instead of the in-process agent
+    /// (from `--external-agent` / `KIGI_EXTERNAL_AGENT`). The child must
+    /// speak ACP JSON-RPC over newline-delimited stdio.
+    pub external_agent: Option<String>,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -180,7 +185,11 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     apply_config_writes(&flags);
 
     let memory_config = agent_config.memory_config.clone();
-    let spawned = spawn::spawn_kigi_shell(agent_config, cancel, memory_config).await?;
+    let spawned = if let Some(command) = flags.external_agent.as_deref() {
+        spawn::spawn_external_agent(command, agent_config, cancel).await?
+    } else {
+        spawn::spawn_kigi_shell(agent_config, cancel, memory_config).await?
+    };
     let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 
@@ -194,20 +203,29 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         session_recap_available,
     ) = initialize(&tx, &flags).await?;
 
-    let (needs_login, login_label, login_method_id, auth_start_mode) =
-        startup_auth_metadata(&auth_methods);
-
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        eager_auth_or_login_fallback(
-            &tx,
-            &auth_methods,
-            default_auth_method_id.as_ref(),
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-        )
-        .await;
+        if flags.external_agent.is_some() {
+            // External agents own their credentials (e.g. `devin acp` reads its
+            // own config). Eager auth is best-effort; a failure or empty method
+            // list must not fall back to the kigi login screen.
+            let meta = authenticate(&tx, &auth_methods, default_auth_method_id.as_ref())
+                .await
+                .unwrap_or_default();
+            (false, None, None, AuthStartMode::Pending, meta)
+        } else {
+            let (needs_login, login_label, login_method_id, auth_start_mode) =
+                startup_auth_metadata(&auth_methods);
+            eager_auth_or_login_fallback(
+                &tx,
+                &auth_methods,
+                default_auth_method_id.as_ref(),
+                needs_login,
+                login_label,
+                login_method_id,
+                auth_start_mode,
+            )
+            .await
+        };
 
     Ok(AcpConnection {
         tx,
