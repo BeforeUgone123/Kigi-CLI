@@ -2689,11 +2689,25 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Unchanged;
                 }
+                if crate::input::key::is_paste_key(key)
+                    || crate::input::key::is_inline_paste_key(key)
+                {
+                    if let Some(text) = crate::clipboard::system_clipboard_get() {
+                        let cleaned: String =
+                            text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                        ctx.auth_code_input.push_str(&cleaned);
+                        return InputOutcome::Changed;
+                    }
+                    crate::clipboard::log_paste_key_empty_host_clipboard("auth input");
+                    return InputOutcome::Unchanged;
+                }
                 if key!(Backspace).matches(key) {
                     ctx.auth_code_input.pop();
                     return InputOutcome::Changed;
                 }
-                if let crossterm::event::KeyCode::Char(c) = key.code {
+                if let crossterm::event::KeyCode::Char(c) = key.code
+                    && crate::input::key::is_text_input_key(key)
+                {
                     ctx.auth_code_input.push(c);
                     return InputOutcome::Changed;
                 }
@@ -2718,11 +2732,25 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Unchanged;
                 }
+                if crate::input::key::is_paste_key(key)
+                    || crate::input::key::is_inline_paste_key(key)
+                {
+                    if let Some(text) = crate::clipboard::system_clipboard_get() {
+                        let cleaned: String =
+                            text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                        ctx.auth_code_input.push_str(&cleaned);
+                        return InputOutcome::Changed;
+                    }
+                    crate::clipboard::log_paste_key_empty_host_clipboard("auth input");
+                    return InputOutcome::Unchanged;
+                }
                 if key!(Backspace).matches(key) {
                     ctx.auth_code_input.pop();
                     return InputOutcome::Changed;
                 }
-                if let crossterm::event::KeyCode::Char(c) = key.code {
+                if let crossterm::event::KeyCode::Char(c) = key.code
+                    && crate::input::key::is_text_input_key(key)
+                {
                     ctx.auth_code_input.push(c);
                     return InputOutcome::Changed;
                 }
@@ -7600,6 +7628,58 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&Event::Paste("en_value".to_string()));
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(app.auth_code_input, "token_value");
+    }
+    /// Ctrl+V / Super+V paste the host clipboard into every auth input.
+    #[test]
+    fn auth_inputs_paste_key_chords_insert_clipboard_text() {
+        let modes = [
+            AuthMode::Loopback,
+            AuthMode::ApiKeyEntry(PlatformLogin(kigi_shell::models::PlatformId::MoonshotCn)),
+            AuthMode::CustomProviderEntry(crate::app::custom_entry::CustomEntryStep::first(
+                kigi_shell::models::custom::CustomApi::OpenAi,
+            )),
+        ];
+        for mode in modes {
+            for mods in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+                let mut app = test_app();
+                app.auth_state = AuthState::Authenticating {
+                    request_seq: 1,
+                    handle: None,
+                    auth_url: None,
+                    mode,
+                };
+                crate::clipboard::set_clipboard_probe_hook(
+                    crate::clipboard::ClipboardProbeHook {
+                        text: Some("sk-pasted\nkey".to_owned()),
+                        ..Default::default()
+                    },
+                );
+                let outcome = app.handle_input(&key_event(KeyCode::Char('v'), mods));
+                crate::clipboard::clear_clipboard_probe_hook();
+                assert!(
+                    matches!(outcome, InputOutcome::Changed),
+                    "{mode:?} + {mods:?} must paste, got {outcome:?}"
+                );
+                assert_eq!(
+                    app.auth_code_input, "sk-pastedkey",
+                    "newlines stripped and no literal 'v' for {mode:?}"
+                );
+            }
+        }
+    }
+    /// Ctrl+letter chords are not text input (the old Ctrl+V inserted 'v').
+    #[test]
+    fn auth_inputs_ignore_control_letter_chords() {
+        let mut app = test_app();
+        app.auth_state = AuthState::Authenticating {
+            request_seq: 1,
+            handle: None,
+            auth_url: None,
+            mode: AuthMode::Loopback,
+        };
+        let outcome = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(outcome, InputOutcome::Unchanged));
+        assert!(app.auth_code_input.is_empty());
     }
     #[test]
     fn authenticating_loopback_enter_empty_is_noop() {
