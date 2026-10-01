@@ -897,6 +897,12 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 effort,
                 prev_model_id: None,
                 model_config_id: model_config_id.clone(),
+                effort_config_option: effort.and_then(|e| {
+                    crate::acp::model_state::effort_config_option(
+                        agent.config_options.as_deref()?,
+                        e,
+                    )
+                }),
             });
         }
         if let Some(mode) = deferred_mode {
@@ -983,6 +989,12 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 effort,
                 prev_model_id: None,
                 model_config_id,
+                effort_config_option: effort.and_then(|e| {
+                    crate::acp::model_state::effort_config_option(
+                        agent.config_options.as_deref()?,
+                        e,
+                    )
+                }),
             });
         }
         if let Some(mode) = deferred_mode {
@@ -1057,6 +1069,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
     }
     vec![]
 }
+#[allow(clippy::too_many_arguments)]
 pub(in crate::app::dispatch) fn handle_switch_model_complete(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1064,9 +1077,20 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     effort: Option<ReasoningEffort>,
     result: Result<Option<u64>, SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
+    config_options: Option<Vec<acp::SessionConfigOption>>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
+        // `session/set_config_option` echoes the full option set — refresh the
+        // cache and re-synthesize the model surface so the picker/footer
+        // reflect the agent's live values (model current + thought_level).
+        if let Some(opts) = config_options {
+            agent.config_options = Some(opts.clone());
+            if let Some(ms) = crate::acp::model_state::models_from_config_options(&opts) {
+                app.models = Some(ms).into();
+                agent.session.models = app.models.clone();
+            }
+        }
         let mut effects = match result {
             Ok(context_window) => {
                 agent.session.user_model_preference = Some(model_id.clone());

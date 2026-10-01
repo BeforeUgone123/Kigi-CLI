@@ -336,6 +336,99 @@ pub fn model_config_id(options: &[acp::SessionConfigOption]) -> Option<acp::Sess
         .map(|o| o.id.clone())
 }
 
+/// The `configId` of the ThoughtLevel-category `session/set_config_option`
+/// selector — the reasoning-effort surface of foreign agents such as
+/// `devin acp` (where `session/set_model` meta cannot carry an effort).
+pub fn thought_level_config_id(
+    options: &[acp::SessionConfigOption],
+) -> Option<acp::SessionConfigId> {
+    thought_level_select(options).map(|o| o.id.clone())
+}
+
+fn thought_level_select(options: &[acp::SessionConfigOption]) -> Option<&acp::SessionConfigOption> {
+    options.iter().find(|o| {
+        matches!(
+            o.category,
+            Some(acp::SessionConfigOptionCategory::ThoughtLevel)
+        )
+    })
+}
+
+/// Map a canonical effort to the agent's own `thought_level` value id — the
+/// wire token `session/set_config_option` expects (devin may spell levels
+/// differently than the canonical enum).
+pub fn thought_level_value_for_effort(
+    options: &[acp::SessionConfigOption],
+    effort: ReasoningEffort,
+) -> Option<String> {
+    let opt = thought_level_select(options)?;
+    let acp::SessionConfigKind::Select(sel) = &opt.kind else {
+        return None;
+    };
+    select_options_flat(&sel.options)
+        .into_iter()
+        .find(|o| {
+            o.value
+                .0
+                .parse::<ReasoningEffort>()
+                .is_ok_and(|e| e == effort)
+        })
+        .map(|o| o.value.0.to_string())
+}
+
+/// Resolve an `effort` against a foreign agent's ThoughtLevel selector into
+/// the `(configId, value id)` pair `Effect::SwitchModel` sends as the second
+/// `session/set_config_option`. `None` when the agent advertises no
+/// ThoughtLevel select (standard agents — effort rides `set_model` meta) or
+/// the enum has no entry in the select.
+pub fn effort_config_option(
+    options: &[acp::SessionConfigOption],
+    effort: ReasoningEffort,
+) -> Option<(acp::SessionConfigId, String)> {
+    let config_id = thought_level_config_id(options)?;
+    let value = thought_level_value_for_effort(options, effort)?;
+    Some((config_id, value))
+}
+
+/// One `Fusion (lead + sidekick)` pair advertised inside the Model-category
+/// select as a `fusion-*` value (devin-tui's `fusionData` shape).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionPair {
+    /// The select-option value id (`fusion-…`) sent as the model value.
+    pub value: String,
+    /// Grouping model, e.g. `SWE-2`.
+    pub lead: String,
+    /// Paired model, e.g. `GLM-4.6`.
+    pub sidekick: String,
+}
+
+/// Extract the fusion pairs from the Model-category select — `fusion-*`
+/// values named `Fusion (<lead> + <sidekick>)`, first-appearance order.
+pub fn fusion_pairs(options: &[acp::SessionConfigOption]) -> Vec<FusionPair> {
+    let Some(opt) = options
+        .iter()
+        .find(|o| matches!(o.category, Some(acp::SessionConfigOptionCategory::Model)))
+    else {
+        return Vec::new();
+    };
+    let acp::SessionConfigKind::Select(sel) = &opt.kind else {
+        return Vec::new();
+    };
+    select_options_flat(&sel.options)
+        .into_iter()
+        .filter(|o| o.value.0.starts_with("fusion-"))
+        .filter_map(|o| {
+            let rest = o.name.strip_prefix("Fusion (")?.strip_suffix(')')?;
+            let (lead, sidekick) = rest.split_once(" + ")?;
+            Some(FusionPair {
+                value: o.value.0.to_string(),
+                lead: lead.trim().to_string(),
+                sidekick: sidekick.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Synthesize a `SessionModelState` from the Model-category select
 /// configOption of a foreign agent's `session/new` response — devin acp
 /// advertises no `models` block, only configOptions. `current_value` is a
@@ -349,12 +442,64 @@ pub fn models_from_config_options(
     let acp::SessionConfigKind::Select(sel) = &opt.kind else {
         return None;
     };
+    // ThoughtLevel select → reasoning-effort menu stamped onto every
+    // synthesized model so `/effort` and `/model <m> <effort>` autocomplete
+    // and validate against the agent's own levels (devin-tui does the same
+    // from the same source). `reasoningEffort` carries the agent's live
+    // level so the footer shows it before any switch.
+    let effort_meta = thought_level_select(options).and_then(|tl| {
+        let acp::SessionConfigKind::Select(sel) = &tl.kind else {
+            return None;
+        };
+        let flat = select_options_flat(&sel.options);
+        let mut menu = Vec::new();
+        let mut current: Option<ReasoningEffort> = None;
+        for (i, o) in flat.iter().enumerate() {
+            let Ok(e) = o.value.0.parse::<ReasoningEffort>() else {
+                continue;
+            };
+            menu.push(serde_json::json!({
+                "id": o.value.0.as_ref(),
+                "value": e.as_str(),
+                "label": o.name,
+                "default": i == 0,
+            }));
+            if o.value.0.as_ref() == sel.current_value.0.as_ref() {
+                current = Some(e);
+            }
+        }
+        if menu.is_empty() {
+            return None;
+        }
+        let mut m = serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEfforts": menu,
+        });
+        if let Some(e) = current {
+            m["reasoningEffort"] = serde_json::Value::String(e.as_str().to_string());
+        }
+        m.as_object().cloned()
+    });
+    let fusion_by_value: std::collections::HashMap<String, FusionPair> = fusion_pairs(options)
+        .into_iter()
+        .map(|p| (p.value.clone(), p))
+        .collect();
     let models: Vec<acp::ModelInfo> = select_options_flat(&sel.options)
         .into_iter()
         .map(|o| {
             let mut info =
                 acp::ModelInfo::new(acp::ModelId::new(o.value.0.to_string()), o.name.clone());
             info.description = o.description.clone();
+            let mut meta = effort_meta.clone().unwrap_or_default();
+            if let Some(pair) = fusion_by_value.get(o.value.0.as_ref()) {
+                meta.insert(
+                    "fusion".to_string(),
+                    serde_json::json!({"lead": pair.lead, "sidekick": pair.sidekick}),
+                );
+            }
+            if !meta.is_empty() {
+                info.meta = Some(meta);
+            }
             info
         })
         .collect();

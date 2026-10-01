@@ -761,10 +761,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return skip_picker_and_create_session(app, id);
             };
             agent.session.model_switch_pending = true;
-            let model_config_id = agent
-                .config_options
-                .as_deref()
-                .and_then(crate::acp::model_state::model_config_id);
+            let opts = agent.config_options.as_deref();
+            let model_config_id = opts.and_then(crate::acp::model_state::model_config_id);
+            let effort_config_option =
+                effort.and_then(|e| crate::acp::model_state::effort_config_option(opts?, e));
             vec![Effect::SwitchModel {
                 agent_id: id,
                 session_id,
@@ -772,6 +772,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 effort,
                 prev_model_id: None,
                 model_config_id,
+                effort_config_option,
             }]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),

@@ -1493,6 +1493,11 @@ pub enum Effect {
         /// sends `session/set_config_option` (devin acp's /model+/fusion
         /// surface) instead of `session/set_model`.
         model_config_id: Option<acp::SessionConfigId>,
+        /// Foreign-agent effort write: `(thought_level configId, value id)`
+        /// resolved by dispatch from `config_options`. `Some` sends a second
+        /// `session/set_config_option` after the model write — devin's
+        /// reasoning effort lives on its own selector, not in model meta.
+        effort_config_option: Option<(acp::SessionConfigId, String)>,
     },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
@@ -2282,6 +2287,10 @@ pub enum TaskResult {
         /// Forwarded from `Effect::SwitchModel.prev_model_id` for
         /// rollback on `IncompatibleAgent`.
         prev_model_id: Option<acp::ModelId>,
+        /// Fresh `configOptions` echoed back by `session/set_config_option`
+        /// (foreign agents — the response carries the authoritative set, so
+        /// the picker/footer reflect the agent's truth without a re-fetch).
+        config_options: Option<Vec<acp::SessionConfigOption>>,
     },
     /// Cross-session prompt history loaded from ACP.
     PromptHistoryLoaded {
