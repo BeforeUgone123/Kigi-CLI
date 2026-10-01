@@ -653,9 +653,11 @@ pub struct PagerArgs {
         env = "KIGI_EXTERNAL_AGENT"
     )]
     pub external_agent: Option<String>,
-    /// Connect through a named external-agent provider preset (e.g.
-    /// `local-devin` → `devin acp`). Mutually exclusive with
-    /// `--external-agent`. Overrides leader mode.
+    /// Connect through a named agent provider (`local-devin` → `devin acp`,
+    /// `kigi` → `kigi acp`, or a `[agent_providers.<name>]` command from
+    /// config.toml). Mutually exclusive with `--external-agent`; when
+    /// neither flag is given, config.toml `provider = "<name>"` applies.
+    /// Overrides leader mode.
     #[arg(
         long = "provider",
         value_name = "NAME",

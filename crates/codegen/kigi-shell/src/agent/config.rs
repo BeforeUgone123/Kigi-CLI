@@ -1086,6 +1086,14 @@ pub struct Config {
     /// is used for all sessions (unless overridden by CLI flag or ACP meta).
     #[serde(default)]
     pub agent: AgentSelectionConfig,
+    /// `provider = "<name>"` — default agent provider, read by the TUI's
+    /// connect path straight from the raw toml. Declared for serde_ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// `[agent_providers.<name>]` — user-defined agent provider commands
+    /// (`command = "..."`). Declared for serde_ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_providers: Option<toml::Value>,
     #[serde(default)]
     pub repo_changes_dedup: RepoChangesDedupConfig,
     /// Skills discovery configuration.
@@ -1465,6 +1473,8 @@ impl Default for Config {
             endpoints,
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
+            provider: None,
+            agent_providers: None,
             repo_changes_dedup: RepoChangesDedupConfig::default(),
             skills: SkillsConfig::default(),
             compat: CompatConfigToml::default(),
