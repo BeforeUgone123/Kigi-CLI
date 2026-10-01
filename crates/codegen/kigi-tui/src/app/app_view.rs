@@ -650,6 +650,13 @@ pub struct AppView {
     /// `event_loop::run` from `connection.leader_status_rx.is_some()`;
     /// defaults to `false` (non-leader, dashboard hidden).
     pub leader_mode: bool,
+    /// `--provider` preset name (e.g. `local-devin`) when the agent backend
+    /// was resolved through the provider registry. Display-only.
+    pub provider_name: Option<String>,
+    /// `InitializeResponse.agent_info.name` (e.g. `devin-acp`).
+    pub agent_backend_name: Option<String>,
+    /// `InitializeResponse.agent_capabilities` verbatim.
+    pub agent_capabilities: acp::AgentCapabilities,
     /// Leader-mode session roster (FleetView dashboard). Populated from
     /// `kigi/sessions/list` polls and `kigi/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which naturally gates roster rendering.
@@ -1155,6 +1162,9 @@ impl AppView {
             show_resolved_model: true,
             usage_visible: true,
             leader_mode: false,
+            provider_name: None,
+            agent_backend_name: None,
+            agent_capabilities: Default::default(),
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,
@@ -4558,6 +4568,9 @@ pub(crate) mod tests {
             show_resolved_model: true,
             usage_visible: true,
             leader_mode: true,
+            provider_name: None,
+            agent_backend_name: None,
+            agent_capabilities: Default::default(),
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
             dashboard_sessions_loading: false,

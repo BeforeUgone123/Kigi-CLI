@@ -476,7 +476,20 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
-        external_agent: args.external_agent.clone(),
+        external_agent: match args.provider.as_deref() {
+            Some(name) => Some(
+                crate::acp::provider::resolve_provider(name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown provider {name:?}; known providers: {}",
+                            crate::acp::provider::known_providers().join(", ")
+                        )
+                    })?
+                    .to_string(),
+            ),
+            None => args.external_agent.clone(),
+        },
+        provider_name: args.provider.clone(),
     };
     let connection = if use_leader && connect_flags.external_agent.is_none() {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
@@ -487,7 +500,7 @@ pub async fn run(
         conn
     } else {
         if use_leader {
-            eprintln!("warning: --external-agent overrides leader mode");
+            eprintln!("warning: --external-agent/--provider overrides leader mode");
         }
         let conn = crate::acp::connect(&cancel, connect_flags).await?;
         tracing::info!(

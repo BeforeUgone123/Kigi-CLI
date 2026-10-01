@@ -1154,6 +1154,8 @@ fn no_deferred_switch_means_no_extra_effect() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
+            config_options: None,
+            modes: None,
         }),
         &mut app,
     );

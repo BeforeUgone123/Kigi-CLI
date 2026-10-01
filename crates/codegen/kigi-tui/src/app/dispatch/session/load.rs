@@ -296,6 +296,11 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
         effects.extend(dispatch(Action::SendPrompt(prompt), app));
         return effects;
     }
+    // Standard `session/list` entries from a foreign ACP agent are resumed
+    // through `session/load`; there is no kigi-side local record for them.
+    if source == "acp" {
+        return dispatch_load_session(app, session_id, None, false);
+    }
     let chat_kind = source == "conversation";
     if chat_kind {
         return dispatch_load_session(app, session_id, None, true);
@@ -850,6 +855,8 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_summary: Option<String>,
     restore_degree: Option<kigi_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
+    config_options: Option<Vec<acp::SessionConfigOption>>,
+    modes: Option<acp::SessionModeState>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -874,6 +881,8 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
         }
+        agent.config_options = config_options;
+        agent.session_modes = modes;
         let deferred = crate::app::dispatch::session::lifecycle::apply_deferred_model_switch(
             agent,
             app.cli_effort_token.as_deref(),
@@ -948,6 +957,10 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 model_id,
                 effort,
                 prev_model_id: None,
+                model_config_id: agent
+                    .config_options
+                    .as_deref()
+                    .and_then(crate::acp::model_state::model_config_id),
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch) && agent.extensions_modal.is_some() {

@@ -7,6 +7,7 @@ pub mod external;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+pub mod provider;
 pub mod spawn;
 pub mod tracker;
 
@@ -92,6 +93,14 @@ pub struct AcpConnection {
     /// mode builds a dedicated one off the same local `auth.json`. Either way it
     /// resolves a fresh bearer per request via the refresh chain.
     pub auth_manager: std::sync::Arc<kigi_shell::auth::AuthManager>,
+    /// `InitializeResponse.agent_capabilities` verbatim — for foreign agents
+    /// this is the source of truth for `session/list`, `session/load` and
+    /// image-prompt support.
+    pub agent_capabilities: acp::AgentCapabilities,
+    /// `InitializeResponse.agent_info.name` (e.g. `devin-acp`).
+    pub agent_name: Option<String>,
+    /// `--provider` preset name (e.g. `local-devin`) for display.
+    pub provider_name: Option<String>,
 }
 
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
@@ -144,6 +153,9 @@ pub struct ConnectFlags {
     /// (from `--external-agent` / `KIGI_EXTERNAL_AGENT`). The child must
     /// speak ACP JSON-RPC over newline-delimited stdio.
     pub external_agent: Option<String>,
+    /// Provider preset name the external-agent command was resolved from
+    /// (`--provider`), for display. `None` for kigi-shell or a raw command.
+    pub provider_name: Option<String>,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -201,6 +213,8 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        agent_capabilities,
+        agent_name,
     ) = initialize(&tx, &flags).await?;
 
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
@@ -244,6 +258,9 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cancel_rewind_enabled,
         session_recap_available,
         auth_manager,
+        agent_capabilities,
+        agent_name,
+        provider_name: flags.provider_name,
     })
 }
 
@@ -310,6 +327,8 @@ pub async fn connect_via_leader(
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        agent_capabilities,
+        agent_name,
     ) = initialize(&tx, &flags).await?;
 
     let (needs_login, login_label, login_method_id, auth_start_mode) =
@@ -355,6 +374,9 @@ pub async fn connect_via_leader(
         cancel_rewind_enabled,
         session_recap_available,
         auth_manager,
+        agent_capabilities,
+        agent_name,
+        provider_name: None,
     })
 }
 
@@ -481,6 +503,8 @@ async fn initialize(
     Vec<acp::AvailableCommand>,
     bool,
     bool,
+    acp::AgentCapabilities,
+    Option<String>,
 )> {
     let req = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -531,6 +555,8 @@ async fn initialize(
         available_commands,
         cancel_rewind_enabled,
         session_recap_available,
+        resp.agent_capabilities,
+        resp.agent_info.map(|i| i.name),
     ))
 }
 

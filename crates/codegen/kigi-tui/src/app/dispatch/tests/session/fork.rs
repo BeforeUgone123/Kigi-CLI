@@ -219,6 +219,8 @@ fn fork_initiation_supersedes_open_reload_window() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            config_options: None,
+            modes: None,
         }),
         &mut app,
     );

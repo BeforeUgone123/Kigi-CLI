@@ -313,6 +313,60 @@ impl ModelState {
     }
 }
 
+/// Flatten a select option list (grouped or ungrouped) into option refs.
+fn select_options_flat(
+    options: &acp::SessionConfigSelectOptions,
+) -> Vec<&acp::SessionConfigSelectOption> {
+    match options {
+        acp::SessionConfigSelectOptions::Ungrouped(v) => v.iter().collect(),
+        acp::SessionConfigSelectOptions::Grouped(groups) => {
+            groups.iter().flat_map(|g| g.options.iter()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The `configId` of the Model-category `session/set_config_option` selector,
+/// if the agent advertises one (foreign agents such as `devin acp` drive model
+/// and fusion switches through it instead of `session/set_model`).
+pub fn model_config_id(options: &[acp::SessionConfigOption]) -> Option<acp::SessionConfigId> {
+    options
+        .iter()
+        .find(|o| matches!(o.category, Some(acp::SessionConfigOptionCategory::Model)))
+        .map(|o| o.id.clone())
+}
+
+/// Synthesize a `SessionModelState` from the Model-category select
+/// configOption of a foreign agent's `session/new` response — devin acp
+/// advertises no `models` block, only configOptions. `current_value` is a
+/// select-option value id, matched by name/id exactly like a real catalog.
+pub fn models_from_config_options(
+    options: &[acp::SessionConfigOption],
+) -> Option<acp::SessionModelState> {
+    let opt = options
+        .iter()
+        .find(|o| matches!(o.category, Some(acp::SessionConfigOptionCategory::Model)))?;
+    let acp::SessionConfigKind::Select(sel) = &opt.kind else {
+        return None;
+    };
+    let models: Vec<acp::ModelInfo> = select_options_flat(&sel.options)
+        .into_iter()
+        .map(|o| {
+            let mut info =
+                acp::ModelInfo::new(acp::ModelId::new(o.value.0.to_string()), o.name.clone());
+            info.description = o.description.clone();
+            info
+        })
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+    Some(acp::SessionModelState::new(
+        acp::ModelId::new(sel.current_value.0.to_string()),
+        models,
+    ))
+}
+
 impl From<Option<acp::SessionModelState>> for ModelState {
     fn from(state: Option<acp::SessionModelState>) -> Self {
         state

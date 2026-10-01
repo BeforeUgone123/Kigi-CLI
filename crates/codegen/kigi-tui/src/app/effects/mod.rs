@@ -160,10 +160,17 @@ pub(crate) fn execute(
                                     ),
                                 ),
                             );
+                            let models = resp.models.clone().or_else(|| {
+                                crate::acp::model_state::models_from_config_options(
+                                    resp.config_options.as_deref().unwrap_or_default(),
+                                )
+                            });
                             TaskResult::SessionCreated {
                                 agent_id,
                                 session_id: resp.session_id,
-                                models: resp.models,
+                                models,
+                                config_options: resp.config_options,
+                                modes: resp.modes,
                             }
                         }
                         Err(e) => {
@@ -441,12 +448,19 @@ pub(crate) fn execute(
                         .await;
                     match result {
                         Ok(resp) => {
+                            let models = resp.models.clone().or_else(|| {
+                                crate::acp::model_state::models_from_config_options(
+                                    resp.config_options.as_deref().unwrap_or_default(),
+                                )
+                            });
                             TaskResult::WorktreeSessionCreated {
                                 agent_id,
                                 session_id: resp.session_id,
                                 worktree_path: worktree_root,
                                 session_cwd,
-                                models: resp.models,
+                                models,
+                                config_options: resp.config_options,
+                                modes: resp.modes,
                             }
                         }
                         Err(e) => {
@@ -515,14 +529,21 @@ pub(crate) fn execute(
                             let running_prompt_id = parse_session_load_running_prompt_id(
                                 resp.meta.as_ref(),
                             );
+                            let models = resp.models.clone().or_else(|| {
+                                crate::acp::model_state::models_from_config_options(
+                                    resp.config_options.as_deref().unwrap_or_default(),
+                                )
+                            });
                             TaskResult::SessionLoaded {
                                 agent_id,
                                 session_id: acp_session_id,
-                                models: resp.models,
+                                models,
                                 code_restored,
                                 restore_summary,
                                 restore_degree,
                                 running_prompt_id,
+                                config_options: resp.config_options,
+                                modes: resp.modes,
                             }
                         }
                         Err(e) => {
@@ -697,11 +718,51 @@ pub(crate) fn execute(
                                 query,
                             }
                         }
-                        Err(e) => {
-                            TaskResult::SessionListFailed {
-                                error: sanitize_user_error(&format!("{e}")),
-                                seq,
-                                query,
+                        Err(kigi_err) => {
+                            // Foreign ACP agent: no `kigi/*` surface — fall back
+                            // to the standard `session/list` method.
+                            let request = acp::ListSessionsRequest::new().cwd(cwd.clone());
+                            match acp_send(request, &tx).await {
+                                Ok(resp) => {
+                                    let arr: Vec<serde_json::Value> = resp
+                                        .sessions
+                                        .into_iter()
+                                        .map(|s| {
+                                            // `source: "acp"` routes the
+                                            // resume path to the standard
+                                            // `session/load` request.
+                                            let mut v = serde_json::json!({
+                                                "sessionId": s.session_id.to_string(),
+                                                "summary": s.title.unwrap_or_default(),
+                                                "cwd": s.cwd.to_string_lossy(),
+                                                "source": "acp",
+                                            });
+                                            v["updatedAt"] = serde_json::Value::String(
+                                                s.updated_at.unwrap_or_else(|| {
+                                                    chrono::Utc::now().to_rfc3339()
+                                                }),
+                                            );
+                                            v
+                                        })
+                                        .collect();
+                                    let sessions = parse_session_picker_entries(
+                                        &serde_json::json!({ "sessions": arr }),
+                                    );
+                                    TaskResult::SessionListLoaded {
+                                        sessions,
+                                        seq,
+                                        query,
+                                    }
+                                }
+                                Err(std_err) => {
+                                    TaskResult::SessionListFailed {
+                                        error: sanitize_user_error(&format!(
+                                            "{kigi_err}; session/list: {std_err}"
+                                        )),
+                                        seq,
+                                        query,
+                                    }
+                                }
                             }
                         }
                     }
@@ -1574,10 +1635,32 @@ pub(crate) fn execute(
             model_id,
             effort,
             prev_model_id,
+            model_config_id,
         } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+                    let result = if let Some(config_id) = model_config_id {
+                        // Foreign agent (devin acp): /model and /fusion ride
+                        // `session/set_config_option`, not `session/set_model`.
+                        // Effort has no standard bearer on this path — devin's
+                        // thought_level is a separate configOption.
+                        acp_send(
+                                acp::SetSessionConfigOptionRequest::new(
+                                    session_id,
+                                    config_id,
+                                    acp::SessionConfigOptionValue::from(
+                                        model_id.0.as_ref(),
+                                    ),
+                                ),
+                                &tx,
+                            )
+                            .await
+                            .map(|_| None)
+                            .map_err(|e| SwitchModelError::Other(sanitize_user_error(
+                                &e.to_string(),
+                            )))
+                    } else {
                     let meta = effort
                         .map(|eff| {
                             use kigi_shell::sampling::types::{
@@ -1595,7 +1678,7 @@ pub(crate) fn execute(
                             model_id.clone(),
                         )
                         .meta(meta);
-                    let result = acp_send(req, &tx)
+                    acp_send(req, &tx)
                         .await
                         .map(|resp| {
                             resp.meta
@@ -1615,7 +1698,8 @@ pub(crate) fn execute(
                             } else {
                                 SwitchModelError::Other(sanitize_user_error(&e.to_string()))
                             }
-                        });
+                        })
+                    };
                     TaskResult::SwitchModelComplete {
                         agent_id,
                         model_id,

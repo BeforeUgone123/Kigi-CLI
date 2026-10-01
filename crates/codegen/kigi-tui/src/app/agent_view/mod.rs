@@ -60,6 +60,7 @@
 use crate::actions::ActionId;
 use crate::key;
 use crate::render::SafeBuf;
+use agent_client_protocol as acp;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Hit areas for inline media buttons, rebuilt each frame.
 ///
@@ -1114,6 +1115,19 @@ pub struct AgentView {
     /// Consumed in the `SessionCreated` / `WorktreeSessionCreated` handlers,
     /// mirroring `AgentSession.deferred_model_switch`.
     pub(crate) deferred_session_mode: Option<kigi_tools::types::SessionMode>,
+    /// `session/new` (or `/load`) `configOptions` from a foreign ACP agent
+    /// (devin acp: `/model`, `/fusion`, thought-level selectors ride
+    /// `session/set_config_option`). `None` for the kigi shell, which uses
+    /// the `kigi/sessionConfig` surface instead.
+    pub(crate) config_options: Option<Vec<acp::SessionConfigOption>>,
+    /// `session/new` (or `/load`) `modes` from a foreign ACP agent. When
+    /// present, Shift+Tab cycles `available_modes` instead of the kigi
+    /// plan/auto/yolo state machine.
+    pub(crate) session_modes: Option<acp::SessionModeState>,
+    /// Formatted `_cognition.ai/turn_stats` accumulator for the status line
+    /// (`↑in ↓out cached · model`), reset per turn. `None` until the first
+    /// stats notification arrives (or forever for non-devin agents).
+    pub(crate) turn_stats_line: Option<String>,
     pub(crate) pending_extensions_fetch: bool,
     /// Whether this view was last rendered inside the dashboard's session
     /// overlay. Updated every frame by `draw`; read when building the

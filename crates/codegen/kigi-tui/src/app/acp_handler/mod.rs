@@ -397,6 +397,20 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         plan_mode_modal_refresh_needed |=
                             detect_plan_mode_change(&notif.request.update, agent);
 
+                        // Foreign agent (devin acp): `config_option_update`
+                        // carries the full option set on every churn — keep the
+                        // cache fresh and re-synthesize the model surface so
+                        // the picker/footer reflect the agent's truth.
+                        if let acp::SessionUpdate::ConfigOptionUpdate(cou) = &notif.request.update {
+                            agent.config_options = Some(cou.config_options.clone());
+                            if let Some(ms) = crate::acp::model_state::models_from_config_options(
+                                &cou.config_options,
+                            ) {
+                                app.models = Some(ms).into();
+                                agent.session.models = app.models.clone();
+                            }
+                        }
+
                         let had_activity_before = agent.session.tracker.activity().is_some();
                         agent.session.handle_update(
                             notif.request.update,
@@ -618,7 +632,93 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
             handle_mcp_server_status(notif, app)
         }
         "kigi/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
+        // Note: the schema strips the leading `_` off ext-method names on
+        // decode, so `_cognition.ai/turn_stats` arrives as
+        // `cognition.ai/turn_stats`.
+        "cognition.ai/turn_stats" => handle_turn_stats(notif, app),
         _ => false,
+    }
+}
+
+/// `cognition.ai/turn_stats` (wire `_cognition.ai/turn_stats`) — devin
+/// acp's per-turn token accounting.
+///
+/// Params: `{sessionId, turnRequestId, responseDimensions: [{uid, label,
+/// kind: {type: 'metric'|'cumulativeMetric', value}}]}`. Token values are
+/// PER TURN. Accumulated into `agent.turn_stats_line`, rendered as a status
+/// chip (`↑in ↓out cached · model`). `_cognition.ai/output` is swallowed
+/// (agent-internal tracing, same as devin-tui).
+fn handle_turn_stats(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        return false;
+    };
+    let Some(session_id) = parsed.get("sessionId").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let sid = acp::SessionId::new(session_id.to_string());
+    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
+        return false;
+    };
+    let is_active = is_matched_agent_active(app, id);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+    let (mut input, mut output, mut cached, mut model) = (0u64, 0u64, 0u64, None::<String>);
+    if let Some(dims) = parsed.get("responseDimensions").and_then(|d| d.as_array()) {
+        for dim in dims {
+            let uid = dim.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
+            let kind = dim.get("kind");
+            let kind_type = kind.and_then(|k| k.get("type")).and_then(|v| v.as_str());
+            match (kind_type, uid) {
+                (Some("metric"), "model") => {
+                    model = kind
+                        .and_then(|k| k.get("value"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+                (Some("cumulativeMetric"), _) => {
+                    let value = kind
+                        .and_then(|k| k.get("value"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    match uid {
+                        "input_tokens" => input = value,
+                        "output_tokens" => output = value,
+                        "cached_input_tokens" => cached = value,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    if input > 0 {
+        parts.push(format!("↑{}", fmt_tokens_compact(input)));
+    }
+    if output > 0 {
+        parts.push(format!("↓{}", fmt_tokens_compact(output)));
+    }
+    if cached > 0 {
+        parts.push(format!("cached {}", fmt_tokens_compact(cached)));
+    }
+    if let Some(m) = model {
+        parts.push(m);
+    }
+    if !parts.is_empty() {
+        agent.turn_stats_line = Some(parts.join(" · "));
+    }
+    is_active
+}
+
+/// `46` / `10.5k` / `1.24M` — mirrors devin-tui `fmtTokens`.
+fn fmt_tokens_compact(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1e6)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else {
+        n.to_string()
     }
 }
 
