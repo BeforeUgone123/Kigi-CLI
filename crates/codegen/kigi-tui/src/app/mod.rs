@@ -476,20 +476,36 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
-        external_agent: match args.provider.as_deref() {
-            Some(name) => Some(
-                crate::acp::provider::resolve_provider(name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unknown provider {name:?}; known providers: {}",
-                            crate::acp::provider::known_providers().join(", ")
-                        )
-                    })?
-                    .to_string(),
-            ),
-            None => args.external_agent.clone(),
+        external_agent: {
+            crate::acp::provider::warn_invalid_agent_providers(&raw_config);
+            // Provider precedence: --provider / KIGI_PROVIDER >
+            // --external-agent (explicit) > config.toml `provider`.
+            let provider_name = args.provider.clone().or_else(|| {
+                if args.external_agent.is_some() {
+                    None
+                } else {
+                    crate::acp::provider::config_default_provider(&raw_config)
+                }
+            });
+            match provider_name.as_deref() {
+                Some(name) => Some(
+                    crate::acp::provider::resolve_provider(name, &raw_config)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "unknown provider {name:?}; set a preset (local-devin) or an [agent_providers.{name}] command in config.toml"
+                            )
+                        })?,
+                ),
+                None => args.external_agent.clone(),
+            }
         },
-        provider_name: args.provider.clone(),
+        provider_name: args.provider.clone().or_else(|| {
+            if args.external_agent.is_some() {
+                None
+            } else {
+                crate::acp::provider::config_default_provider(&raw_config)
+            }
+        }),
     };
     let connection = if use_leader && connect_flags.external_agent.is_none() {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
