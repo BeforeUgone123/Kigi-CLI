@@ -585,6 +585,11 @@ pub struct AppView {
     pub cwd_has_git_ancestor: bool,
     /// ACP channel for sending requests (shared resource, cloned into agents).
     pub acp_tx: AcpAgentTx,
+    /// Shared inbox the event loop drains for ALL agent backends. The primary
+    /// connection's rx and every secondary backend's rx (`/agent <name>`)
+    /// forward into this sender so inbound routing stays single-queue.
+    /// `None` until the event loop installs the merged stream.
+    pub acp_inbox_tx: Option<tokio::sync::mpsc::UnboundedSender<kigi_acp_lib::AcpClientMessage>>,
     /// Local cache of bundle sync/status state from the shell.
     pub(crate) bundle_state: BundleState,
     /// Reusable scratch buffer for rendering.
@@ -1043,6 +1048,7 @@ impl AppView {
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
             acp_tx,
+            acp_inbox_tx: None,
             bundle_state: BundleState::default(),
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
@@ -1217,6 +1223,42 @@ impl AppView {
                 .map(|sid| sid.0.as_ref()),
             _ => None,
         }
+    }
+    /// Resolve which agent backend an [`Effect`] should be sent on.
+    ///
+    /// `/agent <name>` backends carry their own channel on
+    /// `AgentSession::acp_tx`; agent-scoped effects go there, session-scoped
+    /// effects resolve the owning agent by session id, and global effects
+    /// (and unresolvable targets) use the active agent's channel — falling
+    /// back to the primary `acp_tx` when no agent is active.
+    pub(crate) fn tx_for_effect(&self, effect: &crate::app::actions::Effect) -> AcpAgentTx {
+        use crate::app::actions::EffectRoute;
+        let owner_tx = |id: AgentId| self.agents.get(&id).map(|a| a.session.acp_tx.clone());
+        let session_tx = |sid: &str| {
+            self.agents
+                .values()
+                .find(|a| {
+                    a.session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|s| s.0.as_ref() == sid)
+                })
+                .map(|a| a.session.acp_tx.clone())
+        };
+        let fallback = || {
+            if let ActiveView::Agent(id) = self.active_view {
+                owner_tx(id)
+            } else {
+                None
+            }
+        };
+        match effect.route() {
+            EffectRoute::Agent(id) => owner_tx(id),
+            EffectRoute::Session(sid) => session_tx(&sid),
+            EffectRoute::Global => None,
+        }
+        .or_else(fallback)
+        .unwrap_or_else(|| self.acp_tx.clone())
     }
     /// Whether the project picker should intercept the next prompt.
     pub fn needs_project_picker(&self) -> bool {
@@ -4447,6 +4489,7 @@ pub(crate) mod tests {
             project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
+            acp_inbox_tx: None,
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,

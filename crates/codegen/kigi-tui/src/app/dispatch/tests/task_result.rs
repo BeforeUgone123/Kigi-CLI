@@ -537,6 +537,7 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -607,6 +608,7 @@ fn switch_model_complete_installs_the_reported_context_window() {
             effort: None,
             result: Ok(Some(262_144)),
             prev_model_id: Some(wide),
+            config_options: None,
         }),
         &mut app,
     );
@@ -667,6 +669,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -722,6 +725,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -788,6 +792,7 @@ fn switch_to_non_reasoning_model_clears_persisted_effort() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -832,6 +837,7 @@ fn switch_model_complete_failure_pushes_error_and_clears_pending() {
             effort: None,
             result: Err(SwitchModelError::Other("model not found".into())),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -873,6 +879,7 @@ fn switch_model_incompatible_agent_shows_question_modal() {
                 prev_model_id: None,
             }),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -933,6 +940,7 @@ fn incompatible_agent_rollback_restores_previous_model() {
                 prev_model_id: Some(prev_model.clone()),
             }),
             prev_model_id: Some(prev_model.clone()),
+            config_options: None,
         }),
         &mut app,
     );
@@ -978,6 +986,7 @@ fn incompatible_agent_closes_active_modal() {
                 prev_model_id: None,
             }),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -1022,6 +1031,7 @@ fn same_agent_type_switch_no_modal() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -1061,6 +1071,7 @@ fn switch_model_pending_lifecycle() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );

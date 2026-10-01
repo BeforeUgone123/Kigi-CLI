@@ -88,6 +88,58 @@ pub(crate) fn execute(
                 });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
         }
+        Effect::ConnectAgentBackend {
+            agent_id,
+            provider_name,
+            command,
+            inbox,
+        } => {
+            tasks
+                .spawn(async move {
+                    let backend_cancel = tokio_util::sync::CancellationToken::new();
+                    let flags = crate::acp::ConnectFlags {
+                        external_agent: Some(command),
+                        provider_name: Some(provider_name.clone()),
+                        ..Default::default()
+                    };
+                    match crate::acp::connect(&backend_cancel, flags).await {
+                        Ok(conn) => {
+                            let crate::acp::AcpConnection {
+                                tx,
+                                mut rx,
+                                agent_name,
+                                agent_capabilities,
+                                models,
+                                available_commands,
+                                cancel,
+                                ..
+                            } = conn;
+                            tokio::spawn(async move {
+                                while let Some(msg) = rx.recv().await {
+                                    if inbox.send(msg).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            TaskResult::AgentBackendConnected {
+                                agent_id,
+                                provider_name,
+                                tx,
+                                agent_name,
+                                agent_capabilities,
+                                models,
+                                available_commands,
+                                cancel,
+                            }
+                        }
+                        Err(e) => TaskResult::AgentBackendFailed {
+                            agent_id,
+                            provider_name,
+                            error: sanitize_user_error(&e.to_string()),
+                        },
+                    }
+                });
+        }
         Effect::CreateSession {
             agent_id,
             cwd: session_cwd,
@@ -1636,18 +1688,22 @@ pub(crate) fn execute(
             effort,
             prev_model_id,
             model_config_id,
+            effort_config_option,
         } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+                    let mut config_options = None;
                     let result = if let Some(config_id) = model_config_id {
                         // Foreign agent (devin acp): /model and /fusion ride
-                        // `session/set_config_option`, not `session/set_model`.
-                        // Effort has no standard bearer on this path — devin's
-                        // thought_level is a separate configOption.
-                        acp_send(
+                        // `session/set_config_option`, not `session/set_model`;
+                        // effort is a second write onto the ThoughtLevel
+                        // selector. Responses echo the full option set — fold
+                        // it back into `config_options` so the picker/footer
+                        // reflect the agent's truth.
+                        match acp_send(
                                 acp::SetSessionConfigOptionRequest::new(
-                                    session_id,
+                                    session_id.clone(),
                                     config_id,
                                     acp::SessionConfigOptionValue::from(
                                         model_id.0.as_ref(),
@@ -1656,10 +1712,38 @@ pub(crate) fn execute(
                                 &tx,
                             )
                             .await
-                            .map(|_| None)
-                            .map_err(|e| SwitchModelError::Other(sanitize_user_error(
+                        {
+                            Ok(resp) => {
+                                config_options = Some(resp.config_options);
+                                if let Some((effort_id, effort_value)) = effort_config_option {
+                                    match acp_send(
+                                        acp::SetSessionConfigOptionRequest::new(
+                                            session_id,
+                                            effort_id,
+                                            acp::SessionConfigOptionValue::from(
+                                                effort_value.as_str(),
+                                            ),
+                                        ),
+                                        &tx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(resp) => {
+                                            config_options = Some(resp.config_options);
+                                            Ok(None)
+                                        }
+                                        Err(e) => Err(SwitchModelError::Other(
+                                            sanitize_user_error(&e.to_string()),
+                                        )),
+                                    }
+                                } else {
+                                    Ok(None)
+                                }
+                            }
+                            Err(e) => Err(SwitchModelError::Other(sanitize_user_error(
                                 &e.to_string(),
-                            )))
+                            ))),
+                        }
                     } else {
                     let meta = effort
                         .map(|eff| {
@@ -1706,6 +1790,7 @@ pub(crate) fn execute(
                         effort,
                         result,
                         prev_model_id,
+                        config_options,
                     }
                 });
         }

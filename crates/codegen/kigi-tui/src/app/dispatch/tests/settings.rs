@@ -284,6 +284,7 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
@@ -303,6 +304,7 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
             effort: None,
             result: Err(SwitchModelError::Other("network error".into())),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );
