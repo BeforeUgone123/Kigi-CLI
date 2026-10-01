@@ -912,6 +912,12 @@ pub enum Action {
     JumpPickerSelect(EntryId),
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
+    /// `/agent [name]` — open a new agent tab on a named agent provider
+    /// (`local-devin`, a `[agent_providers.<name>]` config entry). `None`
+    /// lists the known providers instead of connecting.
+    ConnectAgentProvider {
+        name: Option<String>,
+    },
 }
 /// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
 ///
@@ -1315,6 +1321,19 @@ pub enum Effect {
         /// One-shot `/chat` or sticky `--chat` — stamp `_meta` kind=chat on
         /// fresh create (resume uses `LoadSession.chat_kind` instead).
         chat_kind: bool,
+    },
+    /// Connect a secondary agent backend (`/agent <name>`): spawn the
+    /// provider's external-agent command, initialize ACP, forward its
+    /// client-bound stream into the shared inbox, then report the
+    /// connection handle so the agent tab can create its session.
+    ConnectAgentBackend {
+        agent_id: AgentId,
+        /// Provider name for display (`local-devin`).
+        provider_name: String,
+        /// External-agent command line, shell-split (e.g. `devin acp`).
+        command: String,
+        /// Shared ACP inbox the backend's rx is forwarded into.
+        inbox: tokio::sync::mpsc::UnboundedSender<kigi_acp_lib::AcpClientMessage>,
     },
     /// Load (resume) an existing ACP session by ID.
     ///
@@ -1904,6 +1923,99 @@ pub enum Effect {
         preparation: crate::prompt_images::PromptImagePreviewPreparation,
     },
 }
+/// Which agent backend an [`Effect`] targets.
+///
+/// Secondary backends (`/agent <name>`) carry their own `AcpAgentTx` on the
+/// agent's session; the event loop resolves each effect through [`Effect::route`]
+/// instead of blindly using the primary `app.acp_tx`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EffectRoute {
+    /// Agent-scoped effect — send on that agent's `session.acp_tx`.
+    Agent(AgentId),
+    /// Session-scoped effect — resolve the owning agent by session id.
+    Session(String),
+    /// No agent/session affinity — the primary backend is fine.
+    Global,
+}
+impl Effect {
+    /// Classify the effect's backend affinity for [`AppView::tx_for_effect`].
+    ///
+    /// Every agent-scoped variant binds a field literally named `agent_id`;
+    /// session-scoped variants bind `session_id` (`acp::SessionId` unless
+    /// noted). Variants carrying both are agent-routed.
+    pub(crate) fn route(&self) -> EffectRoute {
+        match self {
+            Self::Compact { agent_id, .. }
+            | Self::ConnectAgentBackend { agent_id, .. }
+            | Self::CreateSession { agent_id, .. }
+            | Self::CreateWorktreeSession { agent_id, .. }
+            | Self::DebounceSuggestions { agent_id, .. }
+            | Self::DeleteMcpServer { agent_id, .. }
+            | Self::FetchHooksList { agent_id, .. }
+            | Self::FetchMcpsList { agent_id, .. }
+            | Self::FetchPluginsList { agent_id, .. }
+            | Self::FetchPromptHistory { agent_id, .. }
+            | Self::FetchPromptSuggestion { agent_id, .. }
+            | Self::FetchRewindPoints { agent_id, .. }
+            | Self::FetchSessionAgentName { agent_id, .. }
+            | Self::FetchShellSuggestions { agent_id, .. }
+            | Self::FetchSkillsList { agent_id, .. }
+            | Self::FetchUsage { agent_id, .. }
+            | Self::ForkSession { agent_id, .. }
+            | Self::HooksAction { agent_id, .. }
+            | Self::HydrateSessionTitleFromDisk { agent_id, .. }
+            | Self::LoadSession { agent_id, .. }
+            | Self::McpAuthTrigger { agent_id, .. }
+            | Self::PluginsAction { agent_id, .. }
+            | Self::RefreshAvailableCommands { agent_id, .. }
+            | Self::RenameSession { agent_id, .. }
+            | Self::RestoreAndLoadSession { agent_id, .. }
+            | Self::RewindExecute { agent_id, .. }
+            | Self::RewindPreview { agent_id, .. }
+            | Self::RewriteMemoryNote { agent_id, .. }
+            | Self::SaveMemoryNote { agent_id, .. }
+            | Self::SendBashCommand { agent_id, .. }
+            | Self::SendBtw { agent_id, .. }
+            | Self::SendInterject { agent_id, .. }
+            | Self::SendPrompt { agent_id, .. }
+            | Self::SendPromptBlocks { agent_id, .. }
+            | Self::SendPromptNow { agent_id, .. }
+            | Self::SetModeThenPrompt { agent_id, .. }
+            | Self::ShowContextInfo { agent_id, .. }
+            | Self::ShowSessionInfo { agent_id, .. }
+            | Self::SwitchModel { agent_id, .. }
+            | Self::ToggleMcpServer { agent_id, .. }
+            | Self::ToggleMcpTool { agent_id, .. }
+            | Self::ToggleSkill { agent_id, .. }
+            | Self::UpsertMcpServer { agent_id, .. } => EffectRoute::Agent(*agent_id),
+            Self::CancelTurn { session_id, .. }
+            | Self::DeleteScheduledTask { session_id, .. }
+            | Self::DemoteToBackground { session_id, .. }
+            | Self::KillBgTask { session_id, .. }
+            | Self::QueueClear { session_id, .. }
+            | Self::QueueEdit { session_id, .. }
+            | Self::QueueInterject { session_id, .. }
+            | Self::QueueRemove { session_id, .. }
+            | Self::QueueReorder { session_id, .. }
+            | Self::RegisterActiveSession { session_id, .. }
+            | Self::KillSubagent { session_id, .. }
+            | Self::SendRecap { session_id, .. }
+            | Self::SetSessionMode { session_id, .. }
+            | Self::TogglePlanMode { session_id, .. }
+            | Self::UnregisterActiveSession { session_id, .. } => {
+                EffectRoute::Session(session_id.0.to_string())
+            }
+            Self::DeleteSession { session_id, .. } | Self::LoadCardDetail { session_id, .. } => {
+                EffectRoute::Session(session_id.clone())
+            }
+            Self::PersistPermissionMode {
+                session_id: Some(sid),
+                ..
+            } => EffectRoute::Session(sid.0.to_string()),
+            _ => EffectRoute::Global,
+        }
+    }
+}
 /// Outcome of an `kigi/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
 #[derive(Debug)]
@@ -1925,6 +2037,26 @@ pub enum SubagentKillOutcome {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    /// Secondary agent backend connected (`/agent <name>`). Carries the
+    /// backend's request channel so the agent tab can be re-pointed at it,
+    /// plus the metadata needed to seed the tab before its first
+    /// `session/new`.
+    AgentBackendConnected {
+        agent_id: AgentId,
+        provider_name: String,
+        tx: kigi_acp_lib::AcpAgentTx,
+        agent_name: Option<String>,
+        agent_capabilities: acp::AgentCapabilities,
+        models: crate::acp::ModelState,
+        available_commands: Vec<acp::AvailableCommand>,
+        cancel: tokio_util::sync::CancellationToken,
+    },
+    /// Secondary agent backend failed to spawn/initialize (`/agent <name>`).
+    AgentBackendFailed {
+        agent_id: AgentId,
+        provider_name: String,
+        error: String,
+    },
     /// Session was created successfully.
     SessionCreated {
         agent_id: AgentId,

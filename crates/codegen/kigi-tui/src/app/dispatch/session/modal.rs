@@ -8,6 +8,12 @@ use crate::app::dispatch::task_result::unregister_session_effect;
 /// `forked_from` pointers on surviving agents.
 pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agent_id: AgentId) {
     let removed = app.agents.shift_remove(&agent_id);
+    if let Some(ref agent) = removed
+        && let Some(ref cancel) = agent.backend_cancel
+    {
+        // Secondary `/agent <name>` backend: stop its child process.
+        cancel.cancel();
+    }
     for agent in app.agents.values_mut() {
         if agent.session.forked_from == Some(agent_id) {
             agent.session.forked_from = None;

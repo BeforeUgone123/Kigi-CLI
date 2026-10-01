@@ -157,6 +157,59 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
 }
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     match result {
+        TaskResult::AgentBackendConnected {
+            agent_id,
+            provider_name,
+            tx,
+            agent_name,
+            agent_capabilities: _,
+            models,
+            available_commands,
+            cancel,
+        } => {
+            // Re-point the tab at the secondary backend, then create its
+            // session there — the SessionCreated handler binds models,
+            // configOptions and modes from the response as usual.
+            let (cwd, chat_kind) = match app.agents.get(&agent_id) {
+                Some(a) => (a.session.cwd.clone(), a.chat_kind),
+                None => (app.cwd.clone(), false),
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.session.acp_tx = tx;
+                agent.session.models = models;
+                agent.session.available_commands = available_commands;
+                agent.session.available_commands_generation += 1;
+                agent.backend_cancel = Some(cancel);
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Connected to '{provider_name}'{} — creating session…",
+                    agent_name.map(|n| format!(" ({n})")).unwrap_or_default()
+                )));
+            }
+            vec![Effect::CreateSession {
+                agent_id,
+                cwd,
+                model_id: None,
+                preferred_session_id: None,
+                chat_kind,
+            }]
+        }
+        TaskResult::AgentBackendFailed {
+            agent_id,
+            provider_name,
+            error,
+        } => {
+            tracing::error!(
+                agent = ? agent_id, provider = % provider_name, error = % error,
+                "Secondary agent backend failed to connect"
+            );
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.session.prompt_history_loading = false;
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Failed to start agent provider '{provider_name}': {error}"
+                )));
+            }
+            vec![]
+        }
         TaskResult::SessionCreated {
             agent_id,
             session_id,

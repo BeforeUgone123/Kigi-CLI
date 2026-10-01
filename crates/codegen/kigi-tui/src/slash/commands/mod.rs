@@ -3,6 +3,7 @@
 //! Each command lives in its own submodule. This module re-exports
 //! command structs and provides `builtin_commands()` for registry
 //! construction.
+pub mod agent;
 pub mod always_approve;
 pub mod auto;
 pub mod btw;
@@ -72,6 +73,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(new::NewCommand),
+        Arc::new(agent::AgentCommand),
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(copy::CopyCommand),

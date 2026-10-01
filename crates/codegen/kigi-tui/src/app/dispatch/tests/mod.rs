@@ -74,6 +74,7 @@ fn test_app() -> AppView {
         project_picker_disabled: false,
         cwd_has_git_ancestor: false,
         acp_tx: tx,
+        acp_inbox_tx: None,
         scratch: crate::scrollback::render::ScratchBuffer::new(),
         cursor: crate::render::draw::CursorState::new(),
         pending_action: None,

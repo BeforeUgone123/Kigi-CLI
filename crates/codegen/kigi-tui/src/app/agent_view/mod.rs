@@ -1128,6 +1128,9 @@ pub struct AgentView {
     /// (`↑in ↓out cached · model`), reset per turn. `None` until the first
     /// stats notification arrives (or forever for non-devin agents).
     pub(crate) turn_stats_line: Option<String>,
+    /// Kill switch for a secondary `/agent <name>` backend process
+    /// (`devin acp`). `None` for agents on the primary connection.
+    pub(crate) backend_cancel: Option<tokio_util::sync::CancellationToken>,
     pub(crate) pending_extensions_fetch: bool,
     /// Whether this view was last rendered inside the dashboard's session
     /// overlay. Updated every frame by `draw`; read when building the

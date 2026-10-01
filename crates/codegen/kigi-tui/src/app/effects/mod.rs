@@ -88,6 +88,58 @@ pub(crate) fn execute(
                 });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
         }
+        Effect::ConnectAgentBackend {
+            agent_id,
+            provider_name,
+            command,
+            inbox,
+        } => {
+            tasks
+                .spawn(async move {
+                    let backend_cancel = tokio_util::sync::CancellationToken::new();
+                    let flags = crate::acp::ConnectFlags {
+                        external_agent: Some(command),
+                        provider_name: Some(provider_name.clone()),
+                        ..Default::default()
+                    };
+                    match crate::acp::connect(&backend_cancel, flags).await {
+                        Ok(conn) => {
+                            let crate::acp::AcpConnection {
+                                tx,
+                                mut rx,
+                                agent_name,
+                                agent_capabilities,
+                                models,
+                                available_commands,
+                                cancel,
+                                ..
+                            } = conn;
+                            tokio::spawn(async move {
+                                while let Some(msg) = rx.recv().await {
+                                    if inbox.send(msg).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            TaskResult::AgentBackendConnected {
+                                agent_id,
+                                provider_name,
+                                tx,
+                                agent_name,
+                                agent_capabilities,
+                                models,
+                                available_commands,
+                                cancel,
+                            }
+                        }
+                        Err(e) => TaskResult::AgentBackendFailed {
+                            agent_id,
+                            provider_name,
+                            error: sanitize_user_error(&e.to_string()),
+                        },
+                    }
+                });
+        }
         Effect::CreateSession {
             agent_id,
             cwd: session_cwd,
