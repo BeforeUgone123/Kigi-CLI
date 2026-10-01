@@ -222,6 +222,19 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                 AcpAgentMessage::SetSessionModel(args) => {
                     handle!(args, self.tracing, conn, set_session_model, spawn, on_meta);
                 }
+                AcpAgentMessage::ListSessions(args) => {
+                    handle!(args, self.tracing, conn, list_sessions, spawn, on_meta);
+                }
+                AcpAgentMessage::SetSessionConfigOption(args) => {
+                    handle!(
+                        args,
+                        self.tracing,
+                        conn,
+                        set_session_config_option,
+                        spawn,
+                        on_meta
+                    );
+                }
             }
         }
         if self.tracing {

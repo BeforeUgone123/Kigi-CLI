@@ -1331,6 +1331,11 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     let now_active = mode.is_plan();
     agent.plan_mode_active = now_active;
     agent.plan_mode_pending = None;
+    // Foreign agents (devin acp): keep the advertised mode state in sync so
+    // the Shift+Tab cycle and any mode badge follow the agent's truth.
+    if let Some(modes) = agent.session_modes.as_mut() {
+        modes.current_mode_id = cmu.current_mode_id.clone();
+    }
     if was_active != now_active {
         tracing::info!(
             mode_id = % cmu.current_mode_id.0, plan_active = now_active,

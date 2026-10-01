@@ -769,6 +769,8 @@ pub(in crate::app::dispatch) fn handle_session_created(
     agent_id: AgentId,
     session_id: acp::SessionId,
     new_models: Option<acp::SessionModelState>,
+    config_options: Option<Vec<acp::SessionConfigOption>>,
+    modes: Option<acp::SessionModeState>,
 ) -> Vec<Effect> {
     let agent_count = app.agents.len();
     let switch_hint =
@@ -794,8 +796,14 @@ pub(in crate::app::dispatch) fn handle_session_created(
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
         }
+        agent.config_options = config_options;
+        agent.session_modes = modes;
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         let deferred_mode = agent.deferred_session_mode.take();
+        let model_config_id = agent
+            .config_options
+            .as_deref()
+            .and_then(crate::acp::model_state::model_config_id);
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
@@ -823,6 +831,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 model_id,
                 effort,
                 prev_model_id: None,
+                model_config_id: model_config_id.clone(),
             });
         }
         if let Some(mode) = deferred_mode {
@@ -846,6 +855,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
     }
     vec![]
 }
+#[allow(clippy::too_many_arguments)]
 pub(in crate::app::dispatch) fn handle_worktree_session_created(
     app: &mut AppView,
     agent_id: AgentId,
@@ -853,6 +863,8 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     worktree_path: std::path::PathBuf,
     session_cwd: std::path::PathBuf,
     new_models: Option<acp::SessionModelState>,
+    config_options: Option<Vec<acp::SessionConfigOption>>,
+    modes: Option<acp::SessionModeState>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
@@ -870,8 +882,14 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             "Worktree ready: {}",
             worktree_path.display()
         )));
+        agent.config_options = config_options;
+        agent.session_modes = modes;
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         let deferred_mode = agent.deferred_session_mode.take();
+        let model_config_id = agent
+            .config_options
+            .as_deref()
+            .and_then(crate::acp::model_state::model_config_id);
         let cwd = agent.session.cwd.clone();
         if deferred.is_some() {
             agent.session.model_switch_pending = true;
@@ -899,6 +917,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 model_id,
                 effort,
                 prev_model_id: None,
+                model_config_id,
             });
         }
         if let Some(mode) = deferred_mode {

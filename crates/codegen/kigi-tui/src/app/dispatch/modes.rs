@@ -759,6 +759,30 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
         return effects;
     };
 
+    // Foreign agent (devin acp): the agent advertises its own mode list —
+    // cycle `available_modes` verbatim instead of the kigi permission-mode
+    // state machine.
+    if let Some(modes) = agent.session_modes.as_mut()
+        && modes.available_modes.len() > 1
+    {
+        let current_idx = modes
+            .available_modes
+            .iter()
+            .position(|m| m.id == modes.current_mode_id)
+            .unwrap_or(0);
+        let next = &modes.available_modes[(current_idx + 1) % modes.available_modes.len()];
+        let mode_id = next.id.clone();
+        let name = next.name.clone();
+        modes.current_mode_id = mode_id.clone();
+        agent.show_mode_switch_banner(&name);
+        refresh_open_settings_modals(app);
+        tracing::info!(mode_id = % mode_id.0, "Mode cycle (foreign): → {name}");
+        return vec![Effect::SetSessionMode {
+            session_id,
+            mode_id,
+        }];
+    }
+
     // Effective plan state: prefer optimistic pending over confirmed active.
     let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
     let in_yolo = agent.session.is_yolo();

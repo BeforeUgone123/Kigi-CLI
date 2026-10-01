@@ -653,6 +653,16 @@ pub struct PagerArgs {
         env = "KIGI_EXTERNAL_AGENT"
     )]
     pub external_agent: Option<String>,
+    /// Connect through a named external-agent provider preset (e.g.
+    /// `local-devin` → `devin acp`). Mutually exclusive with
+    /// `--external-agent`. Overrides leader mode.
+    #[arg(
+        long = "provider",
+        value_name = "NAME",
+        env = "KIGI_PROVIDER",
+        conflicts_with = "external_agent"
+    )]
+    pub provider: Option<String>,
     /// Initial prompt for the interactive session, e.g. `kigi "fix the bug"` or `kigi --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",

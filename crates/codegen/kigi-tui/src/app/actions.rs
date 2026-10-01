@@ -1470,6 +1470,10 @@ pub enum Effect {
         /// (no optimistic update). Threaded through to
         /// `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
+        /// Foreign-agent path: the Model-category configOption id. `Some`
+        /// sends `session/set_config_option` (devin acp's /model+/fusion
+        /// surface) instead of `session/set_model`.
+        model_config_id: Option<acp::SessionConfigId>,
     },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
@@ -1926,6 +1930,8 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         models: Option<acp::SessionModelState>,
+        config_options: Option<Vec<acp::SessionConfigOption>>,
+        modes: Option<acp::SessionModeState>,
     },
     /// Session creation failed.
     SessionFailed {
@@ -1941,6 +1947,8 @@ pub enum TaskResult {
         /// Effective cwd inside the worktree (preserves subdirectory offset).
         session_cwd: std::path::PathBuf,
         models: Option<acp::SessionModelState>,
+        config_options: Option<Vec<acp::SessionConfigOption>>,
+        modes: Option<acp::SessionModeState>,
     },
     /// Worktree created and session forked, but not yet loaded.
     /// The dispatch handler sets session_id eagerly, then emits LoadSession.
@@ -1972,6 +1980,8 @@ pub enum TaskResult {
         /// pass the live `session/update` gate without re-rendering the user
         /// block (replay already rendered it).
         running_prompt_id: Option<String>,
+        config_options: Option<Vec<acp::SessionConfigOption>>,
+        modes: Option<acp::SessionModeState>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {

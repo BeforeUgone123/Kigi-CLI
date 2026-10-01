@@ -984,6 +984,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -1110,6 +1112,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("task-completed-abc-123".to_string()),
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -1150,6 +1154,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some(pid.to_string()),
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -1187,6 +1193,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -1220,6 +1228,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: None,
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -2431,6 +2441,8 @@
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
+                config_options: None,
+                modes: None,
             }),
             &mut app,
         );

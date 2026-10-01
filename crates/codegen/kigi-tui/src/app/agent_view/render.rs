@@ -1260,6 +1260,16 @@ impl AgentView {
         }) {
             status.push("mcp", mcp_line);
         }
+        // devin acp `_cognition.ai/turn_stats` — last-turn token spend.
+        if let Some(ref line) = self.turn_stats_line {
+            status.push(
+                "turn_stats",
+                Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                )),
+            );
+        }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
         let model_window = self.session.models.get_context_window();
         let ctx_total = self
