@@ -1354,7 +1354,7 @@ fn resolve_subagent_permission_mode(
 pub use kigi_agent::config::AgentDefinition;
 pub use kigi_agent::config::Effort;
 pub use kigi_agent::config::PermissionMode;
-pub use kigi_models::ModelFamilyInfo;
+pub use kigi_models::{ModelFamilyInfo, ModelFusionInfo};
 pub use kigi_shared::ui_config::{ContextualHints, UiConfig};
 /// Configuration for selecting the agent definition.
 ///
@@ -2995,6 +2995,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 model_family: None,
+                fusion: None,
             };
             (key, config)
         })
@@ -3017,6 +3018,8 @@ pub struct ModelEntryConfig {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_family: Option<kigi_models::ModelFamilyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<kigi_models::ModelFusionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3308,6 +3311,8 @@ pub struct ModelInfo {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_family: Option<kigi_models::ModelFamilyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<kigi_models::ModelFusionInfo>,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -3404,6 +3409,7 @@ impl ModelInfo {
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             model_family: None,
+            fusion: None,
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -3441,6 +3447,7 @@ impl ModelInfo {
             stream_tool_calls: entry.stream_tool_calls,
             laziness_detector: entry.laziness_detector.clone(),
             model_family: entry.model_family.clone(),
+            fusion: entry.fusion.clone(),
         }
     }
     /// Derive the legacy effort gate/default from `reasoning_efforts` so the
@@ -4092,6 +4099,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 model_family: None,
+                fusion: None,
             },
             api_key: Some(bearer),
             env_key: None,
@@ -4369,6 +4377,9 @@ pub fn to_acp_model_info(
                 }
                 if let Some(family) = &info.model_family {
                     map.insert("modelFamily".to_string(), serde_json::json!(family));
+                }
+                if let Some(fusion) = &info.fusion {
+                    map.insert("fusion".to_string(), serde_json::json!(fusion));
                 }
                 if map.is_empty() { None } else { Some(map) }
             };
@@ -4945,6 +4956,7 @@ reasoning_effort = "low"
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 model_family: None,
+                fusion: None,
             },
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
@@ -5885,6 +5897,7 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             model_family: None,
+            fusion: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -6046,6 +6059,7 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             model_family: None,
+            fusion: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -6126,6 +6140,7 @@ reasoning_effort = "low"
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 model_family: None,
+                fusion: None,
             };
             let entry = ModelEntry::from_config_entry(&entry_cfg);
             let creds = ResolvedCredentials {
@@ -6297,6 +6312,63 @@ reasoning_effort = "low"
             "absent field defaults to None"
         );
         assert!(ModelInfo::from_config(&entry).model_family.is_none());
+    }
+    #[test]
+    fn model_fusion_info_roundtrips_and_emits_acp_meta() {
+        let json = serde_json::json!({
+            "model": "m", "base_url": "https://t/v1", "context_window": 200000,
+            "fusion": {
+                "lead": "Claude Test Medium", "sidekick": "SWE Test Medium",
+                "leadModel": "claude-test-medium", "sidekickModel": "swe-test-medium"
+            }
+        });
+        let entry: ModelEntryConfig = serde_json::from_value(json).expect("with fusion");
+        let pair = entry.fusion.clone().expect("fusion preserved");
+        assert_eq!(
+            (
+                pair.lead.as_str(),
+                pair.sidekick.as_str(),
+                pair.lead_model.as_str(),
+                pair.sidekick_model.as_str()
+            ),
+            (
+                "Claude Test Medium",
+                "SWE Test Medium",
+                "claude-test-medium",
+                "swe-test-medium"
+            )
+        );
+        let info = ModelInfo::from_config(&entry);
+        assert_eq!(
+            info.fusion.as_ref().map(|f| f.sidekick_model.as_str()),
+            Some("swe-test-medium")
+        );
+
+        let mut models = IndexMap::new();
+        models.insert("devin/fusion-a-sidekick-b".to_string(), {
+            let mut e = ModelEntry::from_config_entry(&entry);
+            e.info.id = Some("devin/fusion-a-sidekick-b".to_string());
+            e
+        });
+        let meta = to_acp_model_info(&models)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .expect("meta");
+        assert_eq!(
+            meta["fusion"],
+            serde_json::json!({
+                "lead": "Claude Test Medium", "sidekick": "SWE Test Medium",
+                "leadModel": "claude-test-medium", "sidekickModel": "swe-test-medium"
+            })
+        );
+
+        let bare =
+            serde_json::json!({"model": "m", "base_url": "https://t/v1", "context_window": 200000});
+        let entry: ModelEntryConfig = serde_json::from_value(bare).expect("without fusion");
+        assert!(entry.fusion.is_none(), "absent field defaults to None");
     }
     #[test]
     fn acp_model_meta_emits_reasoning_efforts_and_derives_legacy() {
@@ -6700,6 +6772,7 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             model_family: None,
+            fusion: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -9409,6 +9482,7 @@ default = "kigi-4.5"
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
                 model_family: None,
+                fusion: None,
             },
             api_key: None,
             env_key: None,

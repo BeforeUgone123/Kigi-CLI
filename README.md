@@ -119,6 +119,21 @@ provider-flagged default variant; every concrete id —
 work directly. Kigi runs the agent — tools, sessions, graph, and swarm
 stay local; Devin serves inference only.
 
+**Fusion.** Devin's catalog also advertises `fusion-…` router rows
+(`Fusion (<lead> + <sidekick>)`). `/fusion` lists one row per lead; Enter
+opens that lead's sidekick list and each row inserts the concrete
+`devin/fusion-…` pair id (also accepted directly via `/model
+devin/fusion-…`). Selecting a pair resolves the lead once per request via
+Devin's `AssignModel`, then chats on the returned uid with the returned
+assignment JWT — the router uid itself is never sent as a chat model.
+Delegation is Kigi-local: an unpinned subagent spawned under a fusion
+parent inherits the pair's configured sidekick model (explicit per-agent
+pins, agent `model:` overrides, runtime/persona pins, and `fork_context`
+all still win). This is Kigi's own implementation — it does not reproduce
+the Devin CLI's helper prompts or loop, and helper-side inference under a
+fusion parent is not verified to match Devin CLI Fusion behavior or
+pricing — treat it as ordinary inference on the configured helper model.
+
 **API-key providers.** Export the env var, or drop the key in
 `~/.kigi/config.toml`. Keys are never logged.
 

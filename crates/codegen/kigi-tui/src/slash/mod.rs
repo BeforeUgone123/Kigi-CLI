@@ -2772,4 +2772,112 @@ mod tests {
             "human family token + tail reaches the Medium child: {inserts:?}"
         );
     }
+
+    fn devin_fusion_state() -> ModelState {
+        let mut state = devin_family_state();
+        let mk = |pair_uid: &str, lead: &str, sidekick: &str, lead_m: &str, side_m: &str| {
+            let mid = acp::ModelId::new(Arc::from(format!("devin/{pair_uid}")));
+            let info = acp::ModelInfo::new(mid.clone(), format!("Fusion ({lead} + {sidekick})"))
+                .meta(
+                    serde_json::json!({
+                        "fusion": {
+                            "lead": lead, "sidekick": sidekick,
+                            "leadModel": lead_m, "sidekickModel": side_m,
+                        },
+                    })
+                    .as_object()
+                    .cloned(),
+                );
+            (mid, info)
+        };
+        for (mid, info) in [
+            mk("fusion-l1-sidekick-h1", "L1", "H1", "l1", "h1"),
+            mk("fusion-l1-sidekick-h2", "L1", "H2", "l1", "h2"),
+            mk("fusion-l2-sidekick-h1", "L2", "H1", "l2", "h1"),
+        ] {
+            state.available.insert(mid, info);
+        }
+        state
+    }
+
+    #[test]
+    fn model_menu_hides_native_fusion_pairs_but_keeps_foreign() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(commands::model::ModelCommand)]),
+            std::path::PathBuf::from("."),
+        );
+        let state = SlashState::default();
+        let mut models = devin_fusion_state();
+        let foreign = acp::ModelId::new(Arc::from("fusion-x-y"));
+        models.available.insert(
+            foreign.clone(),
+            acp::ModelInfo::new(foreign.clone(), "Fusion (X + Y)".to_string()).meta(
+                serde_json::json!({"fusion": {"lead": "X", "sidekick": "Y"}})
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        ctrl.refresh(&state, "/model ", "/model ".len(), &models);
+        let snap = state.snapshot();
+        let inserts = slash_inserts(&snap);
+        assert!(
+            !inserts.iter().any(|i| i.contains("fusion-")),
+            "native fusion pairs hidden from /model: {inserts:?}"
+        );
+        assert!(
+            inserts.iter().any(|i| i == "Fusion (X + Y)"),
+            "foreign fusion pair stays in /model: {inserts:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_menu_groups_native_pairs_by_lead_then_pairs() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(commands::fusion::FusionCommand)]),
+            std::path::PathBuf::from("."),
+        );
+        let state = SlashState::default();
+        let models = devin_fusion_state();
+
+        ctrl.refresh(&state, "/fusion ", "/fusion ".len(), &models);
+        let snap = state.snapshot();
+        let native_roots: Vec<&str> = snap
+            .matches
+            .iter()
+            .filter(|r| r.insert_text.ends_with(' '))
+            .map(|r| r.display.as_str())
+            .collect();
+        assert_eq!(native_roots, vec!["L1", "L2"], "one root per lead uid");
+
+        ctrl.refresh(
+            &state,
+            "/fusion devin/l1 ",
+            "/fusion devin/l1 ".len(),
+            &models,
+        );
+        let snap = state.snapshot();
+        let inserts: std::collections::HashSet<String> = slash_inserts(&snap).into_iter().collect();
+        assert_eq!(
+            inserts,
+            ["devin/fusion-l1-sidekick-h1", "devin/fusion-l1-sidekick-h2"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            "child rows insert the real pair uids"
+        );
+
+        ctrl.refresh(
+            &state,
+            "/fusion devin/l1 h2",
+            "/fusion devin/l1 h2".len(),
+            &models,
+        );
+        let snap = state.snapshot();
+        let inserts = slash_inserts(&snap);
+        assert_eq!(
+            inserts,
+            vec!["devin/fusion-l1-sidekick-h2"],
+            "tail filters helpers"
+        );
+    }
 }

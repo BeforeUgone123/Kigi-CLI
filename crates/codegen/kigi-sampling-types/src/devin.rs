@@ -8,6 +8,7 @@ pub const GET_USER_JWT_PATH: &str = "/exa.auth_pb.AuthService/GetUserJwt";
 pub const GET_CLI_MODEL_CONFIGS_PATH: &str =
     "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 pub const GET_CHAT_MESSAGE_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+pub const ASSIGN_MODEL_PATH: &str = "/exa.api_server_pb.ApiServerService/AssignModel";
 
 pub const DEVIN_SESSION_TOKEN_PREFIX: &str = "devin-session-token$";
 
@@ -353,6 +354,36 @@ pub struct GetChatMessageRequest {
     pub chat_model_uid: String,
     #[prost(string, tag = "22")]
     pub execution_id: String,
+    #[prost(string, optional, tag = "26")]
+    pub model_assignment_jwt: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AssignModelRequest {
+    #[prost(message, optional, tag = "1")]
+    pub metadata: Option<Metadata>,
+    #[prost(string, tag = "2")]
+    pub model_router_uid: String,
+    #[prost(string, tag = "3")]
+    pub cascade_id: String,
+    #[prost(message, optional, tag = "5")]
+    pub chat_message_prompt: Option<ChatMessagePrompt>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ModelAssignment {
+    #[prost(string, tag = "1")]
+    pub assignment_jwt: String,
+    #[prost(string, tag = "2")]
+    pub model_uid: String,
+    #[prost(string, repeated, tag = "3")]
+    pub harness_uids: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AssignModelResponse {
+    #[prost(message, optional, tag = "1")]
+    pub assignment: Option<ModelAssignment>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -414,6 +445,20 @@ pub fn devin_os() -> &'static str {
     } else {
         "linux"
     }
+}
+
+pub fn fusion_model_uids(uid: &str) -> Option<(&str, &str)> {
+    let rest = uid.strip_prefix("fusion-")?;
+    let (lead, sidekick) = rest.split_once("-sidekick-")?;
+    if lead.is_empty()
+        || sidekick.is_empty()
+        || lead.starts_with("fusion-")
+        || sidekick.starts_with("fusion-")
+        || sidekick.contains("-sidekick-")
+    {
+        return None;
+    }
+    Some((lead, sidekick))
 }
 
 pub fn normalize_devin_session_token(token: &str) -> String {
@@ -1048,7 +1093,43 @@ pub fn build_devin_chat_request(
         planner_mode: PLANNER_MODE_DEFAULT,
         chat_model_uid: chat_model_uid.to_string(),
         execution_id: ids.execution_id.clone(),
+        model_assignment_jwt: None,
     })
+}
+
+pub fn build_devin_assign_model_request(
+    req: &ConversationRequest,
+    api_key_wire: &str,
+    user_jwt: &str,
+    model_router_uid: &str,
+    ids: &DevinRequestIds,
+) -> AssignModelRequest {
+    let chat_message_prompt = req.items.iter().rev().find_map(|i| {
+        let ConversationItem::User(u) = i else {
+            return None;
+        };
+        if u.synthetic_reason.is_some() {
+            return None;
+        }
+        let (prompt, images) = content_parts_to_wire(&u.content);
+        Some(ChatMessagePrompt {
+            source: chat_message_source::USER,
+            prompt,
+            images,
+            ..Default::default()
+        })
+    });
+    AssignModelRequest {
+        metadata: Some(devin_cli_metadata(
+            api_key_wire,
+            user_jwt,
+            ids.request_id,
+            &ids.session_id,
+        )),
+        model_router_uid: model_router_uid.to_string(),
+        cascade_id: ids.cascade_id.clone(),
+        chat_message_prompt,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2393,5 +2474,155 @@ mod tests {
             cfg.model_info.as_ref().map(|i| i.model_family_uid.as_str()),
             Some("f")
         );
+    }
+
+    #[test]
+    fn fusion_model_uids_parses_pair_and_rejects_malformed() {
+        assert_eq!(
+            fusion_model_uids("fusion-claude-x-medium-sidekick-swe-y-medium"),
+            Some(("claude-x-medium", "swe-y-medium"))
+        );
+        for bad in [
+            "",
+            "fusion-",
+            "fusion-a",
+            "fusion--sidekick-b",
+            "fusion-a-sidekick-",
+            "fusion-fusion-a-sidekick-b",
+            "fusion-a-sidekick-fusion-b",
+            "fusion-a-sidekick-b-sidekick-c",
+            "claude-medium",
+        ] {
+            assert!(fusion_model_uids(bad).is_none(), "rejected: {bad}");
+        }
+    }
+
+    #[test]
+    fn assign_model_response_decodes_lead_fixture_bytes() {
+        let resp =
+            AssignModelResponse::decode(&[0x0a, 0x06, 0x0a, 0x01, 0x6a, 0x12, 0x01, 0x6c][..])
+                .expect("decode");
+        let assignment = resp.assignment.expect("assignment present");
+        assert_eq!(assignment.assignment_jwt, "j");
+        assert_eq!(assignment.model_uid, "l");
+    }
+
+    #[test]
+    fn chat_request_tag26_assignment_jwt_decodes() {
+        let wire = [0xd2u8, 0x01, 0x01, 0x6a];
+        let req = GetChatMessageRequest::decode(&wire[..]).expect("decode");
+        assert_eq!(req.model_assignment_jwt.as_deref(), Some("j"));
+        let plain = GetChatMessageRequest::decode(&[][..]).expect("decode empty");
+        assert!(plain.model_assignment_jwt.is_none());
+    }
+
+    #[test]
+    fn assign_model_request_uses_latest_user_prompt_only() {
+        let request = req(vec![
+            ConversationItem::user("earlier"),
+            ConversationItem::user("Fusion smoke"),
+            ConversationItem::tool_result("t1", "x"),
+        ]);
+        let assign = build_devin_assign_model_request(
+            &request,
+            "devin-session-token$t",
+            "jwt",
+            "fusion-a-sidekick-b",
+            &ids(),
+        );
+        assert_eq!(assign.model_router_uid, "fusion-a-sidekick-b");
+        assert_eq!(assign.cascade_id, "cascade-1");
+        let meta = assign.metadata.expect("metadata");
+        assert_eq!(meta.api_key, "devin-session-token$t");
+        assert_eq!(meta.user_jwt, "jwt");
+        let prompt = assign.chat_message_prompt.expect("latest user prompt");
+        assert_eq!(prompt.source, chat_message_source::USER);
+        assert_eq!(prompt.prompt, "Fusion smoke");
+        assert!(prompt.tool_call_id.is_empty());
+        assert!(prompt.tool_calls.is_empty());
+        assert!(prompt.thinking.is_empty());
+        assert!(prompt.message_id.is_empty());
+    }
+
+    #[test]
+    fn assign_model_request_preserves_user_image() {
+        let request = req(vec![ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: "look".into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,aGk=".into(),
+            },
+        ])]);
+        let assign =
+            build_devin_assign_model_request(&request, "t", "jwt", "fusion-a-sidekick-b", &ids());
+        let prompt = assign.chat_message_prompt.expect("prompt");
+        assert_eq!(prompt.prompt, "look");
+        assert_eq!(prompt.images.len(), 1);
+    }
+
+    #[test]
+    fn assign_model_request_no_user_gives_none() {
+        let request = req(vec![ConversationItem::tool_result("t1", "x")]);
+        let assign =
+            build_devin_assign_model_request(&request, "t", "jwt", "fusion-a-sidekick-b", &ids());
+        assert!(assign.chat_message_prompt.is_none());
+
+        let synthetic_only = req(vec![ConversationItem::user_meta("synthetic marker")]);
+        let assign = build_devin_assign_model_request(
+            &synthetic_only,
+            "t",
+            "jwt",
+            "fusion-a-sidekick-b",
+            &ids(),
+        );
+        assert!(
+            assign.chat_message_prompt.is_none(),
+            "synthetic user skipped"
+        );
+    }
+
+    #[test]
+    fn assign_model_request_skips_synthetic_tail_user() {
+        let request = req(vec![
+            ConversationItem::user("Fusion smoke"),
+            ConversationItem::user_meta("synthetic marker"),
+            ConversationItem::tool_result("t1", "x"),
+        ]);
+        let assign =
+            build_devin_assign_model_request(&request, "t", "jwt", "fusion-a-sidekick-b", &ids());
+        assert_eq!(
+            assign.chat_message_prompt.expect("prompt").prompt,
+            "Fusion smoke",
+            "the last REAL user message wins over synthetic tails"
+        );
+    }
+
+    #[test]
+    fn assign_model_request_encodes_exact_wire_tags() {
+        let request = req(vec![ConversationItem::user("p")]);
+        let assign = build_devin_assign_model_request(&request, "t", "jwt", "r", &ids());
+        let wire = AssignModelRequest {
+            metadata: None,
+            model_router_uid: "r".to_string(),
+            cascade_id: "c".to_string(),
+            ..assign
+        }
+        .encode_to_vec();
+        assert_eq!(
+            wire,
+            vec![
+                0x12, 0x01, 0x72, 0x1a, 0x01, 0x63, 0x2a, 0x05, 0x10, 0x01, 0x1a, 0x01, 0x70
+            ],
+            "tags 2/3/5 + nested prompt source(2)/prompt(3)"
+        );
+    }
+
+    #[test]
+    fn plain_chat_request_has_no_assignment_jwt() {
+        let request = req(vec![ConversationItem::user("hi")]);
+        let wire =
+            build_devin_chat_request(&request, "t", "jwt", "MODEL_X", &ids()).expect("build");
+        assert!(wire.model_assignment_jwt.is_none());
     }
 }

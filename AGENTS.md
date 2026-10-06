@@ -504,8 +504,31 @@ client-side, no backend surface.
     name / `devin/<family.id>` / `devin/<family.name>` aliases resolve the
     flagged default variant (first member when unflagged), while exact
     concrete ids and full variant names always win. The Devin component of
-    the models disk-cache origin is suffixed `#model-families-v1` so
-    pre-family cached catalogs refetch.
+    the models disk-cache origin is suffixed `#model-families-fusion-v2` so
+    pre-family cached catalogs refetch. FUSION rows (`fusion-<lead
+    uid>-sidekick-<helper uid>` routers) project in a second pass against
+    the eligible-concrete index — a pair row only materializes when BOTH
+    component uids survive the ordinary filters (never synthesized, never
+    disabled/malformed); it clones the lead's capabilities/context and
+    carries `WireModel.fusion` (`{lead,sidekick,leadModel,sidekickModel}`
+    → `_meta.fusion`). At sampling time a fusion uid runs
+    `AssignModel` (tag2 router uid, tag3 cascade id, tag5 latest USER
+    prompt) AFTER `GetUserJwt` — the returned `assignment_jwt` rides
+    `GetChatMessageRequest` tag 26 and the returned `model_uid` becomes
+    the chat uid (missing/blank/echoed-router assignments fail 502 with
+    no chat; JWTs are per-request, never persisted). A fixed Fusion
+    system paragraph is appended to the chat `prompt` naming the raw
+    lead/helper uids. Subagent routing: an unpinned child under a
+    `devin/` fusion parent resolves `devin/<sidekick_model>` through the
+    normal override path (existing pins/fork_context win; stale slug
+    guard `entry.info.model == live cfg.model` gates the lookup). TUI:
+    `/fusion` groups native pairs (meta `leadModel`/`sidekickModel`)
+    under one row per lead — Enter expands sidekicks — while `/model`
+    hides pair rows (exact `devin/fusion-…` ids still resolve);
+    `kigi models` lists them under the `Fusion (Devin)` family. The
+    helper-side loop is Kigi-local — it does not reproduce Devin's
+    sidekick prompts; the real helper dispatch shape is not confirmed by
+    the bounded mock probe (it may be feature-gated or fixture-artifact).
     STREAMING: `DevinEventTranslator` emits Anthropic-Messages events so the
     existing `stream_messages` L2 keeps reasoning/tool/usage/cancel/idle
     semantics; `message_stop` only after a valid end trailer (error trailers
