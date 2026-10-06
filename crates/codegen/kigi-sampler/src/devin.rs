@@ -7,6 +7,13 @@ use kigi_sampling_types::{ConversationRequest, SamplingError};
 
 use crate::client::SamplingClient;
 
+const DEVIN_FUSION_PROMPT: &str = "Native Devin Fusion is active. Configured lead model: {lead}. \
+     Default delegated model: {sidekick}. Use Kigi's existing spawn_subagent tool for suitable \
+     delegated work; unpinned subagents use the paired model. Resume a returned subagent ID to \
+     continue its context. Explicit user model choices and existing permission, cancellation, and \
+     concurrency limits still apply. Do not claim delegation occurred unless a subagent was \
+     actually started and its result received.";
+
 fn devin_http_client() -> Result<reqwest::Client> {
     static CELL: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     if let Some(client) = CELL.get() {
@@ -105,14 +112,79 @@ impl SamplingClient {
             session_id: session_id.clone(),
             request_id,
         };
-        let wire = devin::build_devin_chat_request(
+
+        let fusion_pair = devin::fusion_model_uids(&chat_model_uid);
+        let mut resolved_uid = chat_model_uid.clone();
+        let mut assignment_jwt: Option<String> = None;
+        if fusion_pair.is_some() {
+            let assign_body = devin::build_devin_assign_model_request(
+                &request,
+                &api_key_wire,
+                &user_jwt,
+                &chat_model_uid,
+                &ids,
+            )
+            .encode_to_vec();
+            let assign_url = format!("{}{}", base.trim_end_matches('/'), devin::ASSIGN_MODEL_PATH);
+            let resp = client
+                .post(&assign_url)
+                .timeout(std::time::Duration::from_secs(30))
+                .header(reqwest::header::CONTENT_TYPE, devin::PROTO_CONTENT_TYPE)
+                .header(
+                    devin::CONNECT_PROTOCOL_VERSION_HEADER,
+                    devin::CONNECT_PROTOCOL_VERSION,
+                )
+                .header(reqwest::header::ACCEPT, devin::PROTO_CONTENT_TYPE)
+                .body(assign_body)
+                .send()
+                .await
+                .map_err(SamplingError::Http)?;
+            let resp = self.check_devin_status(resp, &session_token).await?;
+            let body = bounded_body(resp, devin::MAX_DEVIN_UNARY_PAYLOAD).await?;
+            let decoded: devin::AssignModelResponse =
+                devin::decode_unary(&body).map_err(devin::DevinWireError::into_sampling_error)?;
+            let assignment = decoded.assignment.ok_or_else(|| SamplingError::Api {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "Devin AssignModel returned no assignment".to_string(),
+                model_metadata: None,
+                retry_after_secs: None,
+            })?;
+            let assigned_uid = assignment.model_uid.trim().to_string();
+            if assignment.assignment_jwt.trim().is_empty()
+                || assigned_uid.is_empty()
+                || assigned_uid.starts_with("fusion-")
+            {
+                return Err(SamplingError::Api {
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "Devin AssignModel returned an unusable assignment".to_string(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                });
+            }
+            resolved_uid = assigned_uid;
+            assignment_jwt = Some(assignment.assignment_jwt);
+        }
+
+        let mut wire = devin::build_devin_chat_request(
             &request,
             &api_key_wire,
             &user_jwt,
-            &chat_model_uid,
+            &resolved_uid,
             &ids,
         )
         .map_err(devin::DevinWireError::into_sampling_error)?;
+        wire.model_assignment_jwt = assignment_jwt;
+        if let Some((lead_uid, helper_uid)) = fusion_pair {
+            let fusion_line = DEVIN_FUSION_PROMPT
+                .replace("{lead}", lead_uid)
+                .replace("{sidekick}", helper_uid);
+            if wire.prompt.is_empty() {
+                wire.prompt = fusion_line;
+            } else {
+                wire.prompt.push_str("\n\n");
+                wire.prompt.push_str(&fusion_line);
+            }
+        }
         use prost::Message as _;
         let body = devin::frame_connect_message(&wire.encode_to_vec(), false);
         let chat_url = format!(
@@ -138,7 +210,7 @@ impl SamplingClient {
             .map_err(SamplingError::Http)?;
         let resp = self.check_devin_status(resp, &session_token).await?;
 
-        let translator = devin::DevinEventTranslator::new(chat_model_uid);
+        let translator = devin::DevinEventTranslator::new(resolved_uid);
         let attribution_client = self.clone();
         let stream = decode_connect_stream(resp, translator, move |status| {
             if status == 401 || status == 403 {

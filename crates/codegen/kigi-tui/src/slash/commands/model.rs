@@ -5,7 +5,7 @@
 use agent_client_protocol as acp;
 use kigi_shell::sampling::types::supports_reasoning_effort_meta;
 
-use crate::acp::model_state::{ModelState, model_family, model_variant_name};
+use crate::acp::model_state::{ModelState, model_family, model_variant_name, native_fusion};
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::commands::effort_levels::build_effort_arg_items;
@@ -156,6 +156,9 @@ fn detect_family_phase(models: &ModelState, args_query: &str) -> Option<String> 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut best: Option<(usize, String)> = None;
     for info in models.available.values() {
+        if native_fusion(info).is_some() {
+            continue;
+        }
         let Some(family) = model_family(info) else {
             continue;
         };
@@ -184,6 +187,9 @@ fn build_family_items(models: &ModelState, family_id: &str) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::new();
     for (id, info) in &models.available {
+        if native_fusion(info).is_some() {
+            continue;
+        }
         let Some(family) = model_family(info) else {
             continue;
         };
@@ -220,6 +226,9 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut member_counts: indexmap::IndexMap<String, usize> = indexmap::IndexMap::new();
     for info in models.available.values() {
+        if native_fusion(info).is_some() {
+            continue;
+        }
         if let Some(family) = model_family(info) {
             *member_counts.entry(family.id).or_default() += 1;
         }
@@ -227,12 +236,16 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
     for (id, info) in &models.available {
+        if native_fusion(info).is_some() {
+            continue;
+        }
         if let Some(family) = model_family(info)
             && member_counts.get(&family.id).copied().unwrap_or(0) > 1
         {
             if emitted.insert(family.id.clone()) {
                 let any_current = models.available.iter().any(|(mid, minfo)| {
                     current_id == Some(mid)
+                        && native_fusion(minfo).is_none()
                         && model_family(minfo).is_some_and(|f| f.id == family.id)
                 });
                 items.push(ArgItem {

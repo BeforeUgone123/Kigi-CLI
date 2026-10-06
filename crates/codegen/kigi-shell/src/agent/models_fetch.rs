@@ -115,7 +115,7 @@ pub(crate) fn models_fetch_origin(
                 .into_iter()
                 .map(|p| {
                     let marker = (p == kigi_models::PlatformId::Devin)
-                        .then_some("#model-families-v1")
+                        .then_some("#model-families-fusion-v2")
                         .unwrap_or("");
                     format!(
                         "{}={}{}",
@@ -760,6 +760,7 @@ pub(crate) fn wire_model_to_entry(
         stream_tool_calls: None,
         laziness_detector: Default::default(),
         model_family: wire.model_family,
+        fusion: wire.fusion,
     }
 }
 /// Parse a single model entry from the /models response.
@@ -923,6 +924,7 @@ pub fn parse_remote_model_value(
             })
             .unwrap_or_default(),
             model_family: None,
+            fusion: None,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -3958,7 +3960,7 @@ mod tests {
         assert_eq!(
             devin_part,
             format!(
-                "devin={}#model-families-v1",
+                "devin={}#model-families-fusion-v2",
                 platform_models_url(kigi_models::PlatformId::Devin, &cfg)
             )
             .as_str(),
@@ -4027,6 +4029,54 @@ mod tests {
         assert_eq!(
             meta["modelFamily"],
             serde_json::json!({"id": "swe-2", "name": "SWE-2", "isDefault": true})
+        );
+    }
+
+    #[test]
+    fn devin_fusion_survives_wire_entry_info_and_acp_meta() {
+        let wire = kigi_models::WireModel {
+            id: "fusion-lead-uid-sidekick-helper-uid".to_string(),
+            display_name: Some("Fusion (Lead + Helper)".to_string()),
+            fusion: Some(kigi_models::ModelFusionInfo {
+                lead: "Lead".to_string(),
+                sidekick: "Helper".to_string(),
+                lead_model: "lead-uid".to_string(),
+                sidekick_model: "helper-uid".to_string(),
+            }),
+            ..kigi_models::WireModel::bare("x".to_string())
+        };
+        let entry = platform_wire_model_to_entry(
+            kigi_models::PlatformId::Devin,
+            wire,
+            "https://server.codeium.com",
+        );
+        let pair = entry.fusion.clone().expect("fusion on entry");
+        assert_eq!(pair.sidekick_model, "helper-uid");
+
+        let model_entry = crate::agent::config::ModelEntry::from_config_entry(&entry);
+        assert_eq!(
+            model_entry
+                .info
+                .fusion
+                .as_ref()
+                .map(|f| f.lead_model.as_str()),
+            Some("lead-uid"),
+        );
+        let mut models = IndexMap::new();
+        models.insert(entry.id.clone().unwrap(), model_entry);
+        let meta = crate::agent::config::to_acp_model_info(&models)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .expect("meta present");
+        assert_eq!(
+            meta["fusion"],
+            serde_json::json!({
+                "lead": "Lead", "sidekick": "Helper",
+                "leadModel": "lead-uid", "sidekickModel": "helper-uid"
+            })
         );
     }
 }

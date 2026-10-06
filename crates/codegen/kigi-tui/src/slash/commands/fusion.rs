@@ -10,7 +10,7 @@
 
 use agent_client_protocol as acp;
 
-use crate::acp::model_state::ModelState;
+use crate::acp::model_state::{ModelState, native_fusion};
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
@@ -50,20 +50,73 @@ impl SlashCommand for FusionCommand {
         fusion_entries(ctx.models).next().is_some()
     }
 
-    fn suggest_args(&self, ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
-        let current_id = ctx.models.current.as_ref();
-        let items: Vec<ArgItem> = fusion_entries(ctx.models)
-            .map(|(id, info, lead, sidekick)| ArgItem {
-                display: if current_id == Some(id) {
-                    format!("{} (current)", info.name)
-                } else {
-                    info.name.clone()
-                },
-                match_text: format!("{lead} {sidekick} {}", id.0),
-                insert_text: info.name.clone(),
-                description: format!("{lead} + {sidekick}"),
-            })
-            .collect();
+    fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
+        let models = ctx.models;
+        let current_id = models.current.as_ref();
+
+        if let Some(lead_model) = detect_native_fusion_phase(models, args_query) {
+            let items: Vec<ArgItem> = models
+                .available
+                .iter()
+                .filter_map(|(id, info)| native_fusion(info).map(|f| (id, f)))
+                .filter(|(_, f)| f.lead_model == lead_model)
+                .map(|(id, f)| ArgItem {
+                    display: if current_id == Some(id) {
+                        format!("{} (current)", f.sidekick)
+                    } else {
+                        f.sidekick.clone()
+                    },
+                    match_text: format!(
+                        "{} devin/{} devin/{} {} {}",
+                        f.lead, f.lead_model, f.lead, f.sidekick, id.0
+                    ),
+                    insert_text: id.0.to_string(),
+                    description: format!("{} + {}", f.lead, f.sidekick),
+                })
+                .collect();
+            return if items.is_empty() { None } else { Some(items) };
+        }
+
+        let mut items: Vec<ArgItem> = Vec::new();
+        let mut seen_leads: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (id, info) in &models.available {
+            if let Some(f) = native_fusion(info) {
+                if !seen_leads.insert(f.lead_model.clone()) {
+                    continue;
+                }
+                let any_current = models.available.iter().any(|(mid, minfo)| {
+                    current_id == Some(mid)
+                        && native_fusion(minfo).is_some_and(|g| g.lead_model == f.lead_model)
+                });
+                items.push(ArgItem {
+                    display: if any_current {
+                        format!("{} (current)", f.lead)
+                    } else {
+                        f.lead.clone()
+                    },
+                    match_text: format!("{} devin/{}", f.lead, f.lead_model),
+                    insert_text: format!("devin/{} ", f.lead_model),
+                    description: "Devin · fusion sidekicks".to_string(),
+                });
+                continue;
+            }
+            if let Some(f_meta) = info.meta.as_ref().and_then(|m| m.get("fusion")) {
+                let lead = f_meta.get("lead").and_then(|v| v.as_str());
+                let sidekick = f_meta.get("sidekick").and_then(|v| v.as_str());
+                if let (Some(lead), Some(sidekick)) = (lead, sidekick) {
+                    items.push(ArgItem {
+                        display: if current_id == Some(id) {
+                            format!("{} (current)", info.name)
+                        } else {
+                            info.name.clone()
+                        },
+                        match_text: format!("{lead} {sidekick} {}", id.0),
+                        insert_text: info.name.clone(),
+                        description: format!("{lead} + {sidekick}"),
+                    });
+                }
+            }
+        }
         if items.is_empty() { None } else { Some(items) }
     }
 
@@ -101,6 +154,30 @@ impl SlashCommand for FusionCommand {
             }
         }
     }
+}
+
+fn detect_native_fusion_phase(models: &ModelState, args_query: &str) -> Option<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut best: Option<(usize, String)> = None;
+    for info in models.available.values() {
+        let Some(f) = native_fusion(info) else {
+            continue;
+        };
+        if !seen.insert(f.lead_model.clone()) {
+            continue;
+        }
+        for token in [f.lead.clone(), format!("devin/{}", f.lead_model)] {
+            if args_query.len() > token.len()
+                && args_query.is_char_boundary(token.len())
+                && args_query[..token.len()].eq_ignore_ascii_case(&token)
+                && args_query[token.len()..].starts_with(char::is_whitespace)
+                && best.as_ref().is_none_or(|(len, _)| token.len() > *len)
+            {
+                best = Some((token.len(), f.lead_model.clone()));
+            }
+        }
+    }
+    best.map(|(_, lead_model)| lead_model)
 }
 
 /// The fusion models in the catalog — `(model_id, info, lead, sidekick)`.
@@ -155,6 +232,13 @@ fn resolve_fusion(models: &ModelState, arg: &str) -> Option<acp::ModelId> {
             continue;
         }
         if format!("{lead} {sidekick}") == core {
+            return Some(id.clone());
+        }
+    }
+    for (id, info) in &models.available {
+        if let Some(f) = native_fusion(info)
+            && format!("devin/{}", f.lead_model).eq_ignore_ascii_case(arg)
+        {
             return Some(id.clone());
         }
     }
@@ -287,5 +371,232 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
         };
         assert!(!FusionCommand.visible(&ctx));
+    }
+
+    fn native_pair(
+        pair_uid: &str,
+        lead: &str,
+        sidekick: &str,
+        lead_model: &str,
+        sidekick_model: &str,
+    ) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from(format!("devin/{pair_uid}")));
+        let info = acp::ModelInfo::new(id.clone(), format!("Fusion ({lead} + {sidekick})")).meta(
+            serde_json::json!({
+                "fusion": {
+                    "lead": lead, "sidekick": sidekick,
+                    "leadModel": lead_model, "sidekickModel": sidekick_model,
+                },
+            })
+            .as_object()
+            .cloned(),
+        );
+        (id, info)
+    }
+
+    fn native_fusion_models() -> ModelState {
+        let mut state = fusion_models();
+        for (id, info) in [
+            native_pair("fusion-a-sidekick-b", "LeadA", "HelperB", "a", "b"),
+            native_pair("fusion-a-sidekick-c", "LeadA", "HelperC", "a", "c"),
+            native_pair("fusion-d-sidekick-b", "LeadD", "HelperB", "d", "b"),
+        ] {
+            state.available.insert(id, info);
+        }
+        state
+    }
+
+    #[test]
+    fn native_fusion_root_rows_one_per_lead_with_trailing_space() {
+        let models = native_fusion_models();
+        let cwd = std::path::PathBuf::from("/tmp");
+        let ctx = AppCtx {
+            models: &models,
+            cwd: &cwd,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        let items = FusionCommand.suggest_args(&ctx, "").expect("items");
+        let native_rows: Vec<&ArgItem> = items
+            .iter()
+            .filter(|i| i.insert_text.ends_with(' '))
+            .collect();
+        assert_eq!(native_rows.len(), 2, "one root row per lead model");
+        assert_eq!(native_rows[0].display, "LeadA");
+        assert_eq!(native_rows[0].insert_text, "devin/a ");
+        assert_eq!(native_rows[1].display, "LeadD");
+        assert_eq!(native_rows[1].insert_text, "devin/d ");
+        assert!(
+            items.iter().any(|i| i.insert_text == "Fusion (A + B)"),
+            "foreign single rows remain"
+        );
+    }
+
+    #[test]
+    fn native_fusion_child_phase_lists_pair_uids() {
+        let models = native_fusion_models();
+        let cwd = std::path::PathBuf::from("/tmp");
+        let ctx = AppCtx {
+            models: &models,
+            cwd: &cwd,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        for prefix in ["devin/a ", "Leada "] {
+            let items = FusionCommand.suggest_args(&ctx, prefix).expect("children");
+            let inserts: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+            assert_eq!(
+                inserts,
+                vec!["devin/fusion-a-sidekick-b", "devin/fusion-a-sidekick-c"],
+                "prefix {prefix:?} lists the actual pair uids"
+            );
+            assert_eq!(items[0].display, "HelperB");
+            assert!(
+                items[0].match_text.contains("devin/a")
+                    && items[0].match_text.contains("HelperB")
+                    && items[0].match_text.contains("LeadA"),
+                "match_text carries parent aliases + helper: {}",
+                items[0].match_text
+            );
+        }
+    }
+
+    #[test]
+    fn native_fusion_resolves_exact_lead_alias_and_full_name() {
+        let models = native_fusion_models();
+        for (q, want) in [
+            ("devin/fusion-a-sidekick-c", "devin/fusion-a-sidekick-c"),
+            ("Fusion (LeadA + HelperC)", "devin/fusion-a-sidekick-c"),
+            ("leada + helperc", "devin/fusion-a-sidekick-c"),
+            ("leada helperc", "devin/fusion-a-sidekick-c"),
+            ("devin/a", "devin/fusion-a-sidekick-b"),
+            ("leada", "devin/fusion-a-sidekick-b"),
+            ("devin/d", "devin/fusion-d-sidekick-b"),
+        ] {
+            assert_eq!(
+                resolve_fusion(&models, q)
+                    .map(|id| id.0.to_string())
+                    .as_deref(),
+                Some(want),
+                "query: {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_fusion_phase_longest_overlapping_lead_prefix_and_case() {
+        let mut models = fusion_models();
+        for (id, info) in [
+            native_pair("fusion-lead-sidekick-h1", "Lead", "H1", "lead", "h1"),
+            native_pair(
+                "fusion-lead-pro-sidekick-h1",
+                "Lead Pro",
+                "H1",
+                "lead-pro",
+                "h1",
+            ),
+            native_pair(
+                "fusion-lead-pro-sidekick-h9",
+                "Lead Pro",
+                "H9",
+                "lead-pro",
+                "h9",
+            ),
+        ] {
+            models.available.insert(id, info);
+        }
+        let cwd = std::path::PathBuf::from("/tmp");
+        let ctx = AppCtx {
+            models: &models,
+            cwd: &cwd,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        let items = FusionCommand
+            .suggest_args(&ctx, "lead pro ")
+            .expect("children");
+        let inserts: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+        assert_eq!(
+            inserts,
+            vec![
+                "devin/fusion-lead-pro-sidekick-h1",
+                "devin/fusion-lead-pro-sidekick-h9"
+            ],
+            "longest lead alias wins: `lead pro ` beats the `lead` prefix"
+        );
+
+        let items = FusionCommand
+            .suggest_args(&ctx, "DEVIN/LEAD-PRO ")
+            .expect("children");
+        let inserts: Vec<&str> = items.iter().map(|i| i.insert_text.as_str()).collect();
+        assert_eq!(
+            inserts.len(),
+            2,
+            "devin/<lead_uid> alias is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn native_fusion_current_pair_marks_root_and_helper() {
+        let mut models = fusion_models();
+        let current = acp::ModelId::new(Arc::from("devin/fusion-a-sidekick-b"));
+        for (id, info) in [
+            native_pair("fusion-a-sidekick-b", "LeadA", "HelperB", "a", "b"),
+            native_pair("fusion-a-sidekick-c", "LeadA", "HelperC", "a", "c"),
+            native_pair("fusion-d-sidekick-b", "LeadD", "HelperB", "d", "b"),
+        ] {
+            models.available.insert(id, info);
+        }
+        models.current = Some(current);
+        let cwd = std::path::PathBuf::from("/tmp");
+        let ctx = AppCtx {
+            models: &models,
+            cwd: &cwd,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        let items = FusionCommand.suggest_args(&ctx, "").expect("items");
+        let lead_a = items.iter().find(|i| i.insert_text == "devin/a ").unwrap();
+        assert_eq!(
+            lead_a.display, "LeadA (current)",
+            "any active pair marks its lead"
+        );
+        let lead_d = items.iter().find(|i| i.insert_text == "devin/d ").unwrap();
+        assert_eq!(lead_d.display, "LeadD");
+
+        let items = FusionCommand
+            .suggest_args(&ctx, "devin/a ")
+            .expect("children");
+        let helper_b = items
+            .iter()
+            .find(|i| i.insert_text == "devin/fusion-a-sidekick-b")
+            .unwrap();
+        assert_eq!(helper_b.display, "HelperB (current)");
+        let helper_c = items
+            .iter()
+            .find(|i| i.insert_text == "devin/fusion-a-sidekick-c")
+            .unwrap();
+        assert_eq!(helper_c.display, "HelperC");
+    }
+
+    #[test]
+    fn native_fusion_run_emits_switch_model() {
+        let mut models = fusion_models();
+        let (id, info) = native_pair("fusion-a-sidekick-b", "LeadA", "HelperB", "a", "b");
+        models.available.insert(id, info);
+        let mut ctx = dummy_exec_ctx(&models);
+        let out = FusionCommand.run(&mut ctx, "devin/fusion-a-sidekick-b");
+        let model_id = match out {
+            CommandResult::Action(Action::SwitchModel { model_id, .. }) => model_id,
+            other => panic!("expected SwitchModel, got {other:?}"),
+        };
+        assert_eq!(model_id.0.as_ref(), "devin/fusion-a-sidekick-b");
+
+        let out = FusionCommand.run(&mut ctx, "devin/a");
+        assert_eq!(
+            match out {
+                CommandResult::Action(Action::SwitchModel { model_id, .. }) => {
+                    model_id.0.to_string()
+                }
+                other => panic!("expected SwitchModel, got {other:?}"),
+            },
+            "devin/fusion-a-sidekick-b"
+        );
     }
 }

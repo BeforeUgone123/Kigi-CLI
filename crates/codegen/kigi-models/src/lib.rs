@@ -1655,6 +1655,7 @@ fn codex_wire_model(slug: &str, display_name: &str, efforts: &[&str], default: &
             default_effort: Some(default.to_string()),
         }),
         model_family: None,
+        fusion: None,
     }
 }
 
@@ -1792,6 +1793,8 @@ pub struct WireModel {
     pub think_efforts: Option<WireThinkEfforts>,
     #[serde(default)]
     pub model_family: Option<ModelFamilyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<ModelFusionInfo>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1801,6 +1804,15 @@ pub struct ModelFamilyInfo {
     pub name: String,
     #[serde(default)]
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFusionInfo {
+    pub lead: String,
+    pub sidekick: String,
+    pub lead_model: String,
+    pub sidekick_model: String,
 }
 
 /// The `think_efforts` object of a `/models` entry. Live wire shape
@@ -1831,6 +1843,7 @@ impl WireModel {
             supports_thinking_type: None,
             think_efforts: None,
             model_family: None,
+            fusion: None,
         }
     }
 }
@@ -1979,6 +1992,7 @@ pub fn parse_anthropic_listing(json: &str) -> Result<Vec<WireModel>, serde_json:
                 supports_thinking_type: None,
                 think_efforts,
                 model_family: None,
+                fusion: None,
             }
         })
         .collect())
@@ -2187,6 +2201,7 @@ pub fn parse_github_copilot_listing(json: &str) -> Result<Vec<WireModel>, serde_
             supports_thinking_type: None,
             think_efforts: None,
             model_family: None,
+            fusion: None,
         })
         .collect();
     Ok(kept)
@@ -3181,6 +3196,7 @@ mod tests {
                 supports_thinking_type: None,
                 think_efforts: None,
                 model_family: None,
+                fusion: None,
             },
             WireModel {
                 id: "moonshot-v1-8k".into(),
@@ -3193,6 +3209,7 @@ mod tests {
                 supports_thinking_type: None,
                 think_efforts: None,
                 model_family: None,
+                fusion: None,
             },
         ];
         let filtered = filter_allowed_models(PlatformId::MoonshotCn, listing.clone());

@@ -766,3 +766,408 @@ async fn devin_401_status_attributes_the_dispatched_token() {
         "only a prefix crosses the callback boundary: {calls:?}"
     );
 }
+
+#[derive(Clone, Default)]
+struct FusionCaptures {
+    paths: Arc<Mutex<Vec<String>>>,
+    jwt_meta: Arc<Mutex<Option<devin::Metadata>>>,
+    assign_request: Arc<Mutex<Option<devin::AssignModelRequest>>>,
+    assign_auth_header: Arc<Mutex<Option<String>>>,
+    assign_hits: Arc<Mutex<u32>>,
+    chat_request: Arc<Mutex<Option<devin::GetChatMessageRequest>>>,
+    chat_auth_header: Arc<Mutex<Option<String>>>,
+    chat_hits: Arc<Mutex<u32>>,
+}
+
+fn fusion_app(caps: FusionCaptures, assign: (StatusCode, Vec<u8>), chat_body: Vec<u8>) -> Router {
+    let jwt_caps = caps.clone();
+    let assign_caps = caps.clone();
+    let chat_caps = caps.clone();
+    Router::new()
+        .route(
+            devin::GET_USER_JWT_PATH,
+            post(move |body: axum::body::Bytes| {
+                let caps = jwt_caps.clone();
+                async move {
+                    caps.paths.lock().unwrap().push("GetUserJwt".to_string());
+                    let req = devin::GetUserJwtRequest::decode(&body[..])
+                        .expect("decode GetUserJwtRequest");
+                    *caps.jwt_meta.lock().unwrap() = req.metadata;
+                    let resp = devin::GetUserJwtResponse {
+                        user_jwt: "jwt-fresh".to_string(),
+                        custom_api_server_url: String::new(),
+                    };
+                    (StatusCode::OK, resp.encode_to_vec())
+                }
+            }),
+        )
+        .route(
+            devin::ASSIGN_MODEL_PATH,
+            post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                let caps = assign_caps.clone();
+                let (status, resp_body) = assign.clone();
+                async move {
+                    caps.paths.lock().unwrap().push("AssignModel".to_string());
+                    *caps.assign_hits.lock().unwrap() += 1;
+                    *caps.assign_auth_header.lock().unwrap() = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    *caps.assign_request.lock().unwrap() =
+                        devin::AssignModelRequest::decode(&body[..]).ok();
+                    (status, resp_body)
+                }
+            }),
+        )
+        .route(
+            devin::GET_CHAT_MESSAGE_PATH,
+            post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                let caps = chat_caps.clone();
+                let chat_body = chat_body.clone();
+                async move {
+                    caps.paths
+                        .lock()
+                        .unwrap()
+                        .push("GetChatMessage".to_string());
+                    *caps.chat_hits.lock().unwrap() += 1;
+                    *caps.chat_auth_header.lock().unwrap() = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    let len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+                    *caps.chat_request.lock().unwrap() =
+                        devin::GetChatMessageRequest::decode(&body[5..5 + len]).ok();
+                    (StatusCode::OK, chat_body)
+                }
+            }),
+        )
+}
+
+fn fusion_conversation() -> ConversationRequest {
+    ConversationRequest {
+        items: vec![
+            kigi_sampling_types::ConversationItem::System(kigi_sampling_types::SystemItem {
+                content: std::sync::Arc::from("base system"),
+            }),
+            kigi_sampling_types::ConversationItem::user("fusion smoke"),
+        ],
+        model: Some("fusion-claude-test-medium-sidekick-swe-test-medium".to_string()),
+        ..Default::default()
+    }
+}
+
+fn fusion_assign_body(jwt: &str, uid: &str) -> Vec<u8> {
+    devin::AssignModelResponse {
+        assignment: Some(devin::ModelAssignment {
+            assignment_jwt: jwt.to_string(),
+            model_uid: uid.to_string(),
+            harness_uids: vec![],
+        }),
+    }
+    .encode_to_vec()
+}
+
+#[tokio::test]
+async fn devin_fusion_assigns_then_chats_on_lead_uid() {
+    let caps = FusionCaptures::default();
+    let chat_body = {
+        let text = devin::GetChatMessageResponse {
+            delta_text: "FUSION_MAIN_OK".to_string(),
+            stop_reason: 2,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&frame(&text, 0));
+        wire.extend_from_slice(&frame(b"{}", devin::CONNECT_FLAG_END_STREAM));
+        wire
+    };
+    let server = MockServer::spawn(fusion_app(
+        caps.clone(),
+        (
+            StatusCode::OK,
+            fusion_assign_body("FAKE-ASSIGN-JWT", "claude-test-medium"),
+        ),
+        chat_body,
+    ))
+    .await;
+    let client = SamplingClient::new(devin_config(
+        server.base_url(),
+        "fusion-claude-test-medium-sidekick-swe-test-medium",
+    ))
+    .expect("client");
+
+    let (raw, _meta) = client
+        .conversation_stream_messages(fusion_conversation())
+        .await
+        .expect("stream");
+    let (response, _metrics) = kigi_sampler::collect_response(kigi_sampler::stream_messages(
+        raw,
+        None,
+        kigi_sampler::RequestId::random(),
+        std::time::Duration::from_secs(30),
+    ))
+    .await
+    .expect("collect");
+
+    assert_eq!(
+        caps.paths.lock().unwrap().as_slice(),
+        &["GetUserJwt", "AssignModel", "GetChatMessage"],
+        "GetUserJwt -> AssignModel -> GetChatMessage"
+    );
+    let assign = caps
+        .assign_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("assign request");
+    assert_eq!(
+        assign.model_router_uid,
+        "fusion-claude-test-medium-sidekick-swe-test-medium"
+    );
+    let assign_meta = assign.metadata.expect("assign metadata");
+    assert_eq!(assign_meta.api_key, "devin-session-token$tok-construction");
+    assert_eq!(assign_meta.user_jwt, "jwt-fresh");
+    assert!(
+        caps.assign_auth_header.lock().unwrap().is_none(),
+        "session token stays in Metadata, never the Authorization header"
+    );
+    let assign_prompt = assign.chat_message_prompt.expect("user prompt echoed");
+    assert_eq!(assign_prompt.prompt, "fusion smoke");
+
+    let chat = caps
+        .chat_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("chat request");
+    assert_eq!(
+        chat.chat_model_uid, "claude-test-medium",
+        "assigned lead uid"
+    );
+    assert_eq!(
+        chat.model_assignment_jwt.as_deref(),
+        Some("FAKE-ASSIGN-JWT"),
+        "tag 26 assignment jwt"
+    );
+    assert_eq!(
+        chat.cascade_id, assign.cascade_id,
+        "chat and assign share the cascade id"
+    );
+    let expected_prompt = "base system\n\nNative Devin Fusion is active. Configured lead model: claude-test-medium. Default delegated model: swe-test-medium. Use Kigi's existing spawn_subagent tool for suitable delegated work; unpinned subagents use the paired model. Resume a returned subagent ID to continue its context. Explicit user model choices and existing permission, cancellation, and concurrency limits still apply. Do not claim delegation occurred unless a subagent was actually started and its result received.";
+    assert_eq!(chat.prompt, expected_prompt, "exact whole prompt");
+    let meta = chat.metadata.expect("chat metadata");
+    assert_eq!(meta.api_key, "devin-session-token$tok-construction");
+    assert!(caps.chat_auth_header.lock().unwrap().is_none());
+
+    let assistant = response.assistant().expect("assistant");
+    assert_eq!(assistant.content.as_ref(), "FUSION_MAIN_OK");
+    server.shutdown_tx.send(()).ok();
+}
+
+#[tokio::test]
+async fn devin_fusion_assign_auth_failure_fails_before_chat() {
+    #[derive(Debug, Default)]
+    struct Rec(std::sync::Mutex<Vec<(kigi_sampler::SamplingConsumer, Option<String>)>>);
+    impl kigi_sampler::Auth401AttributionCallback for Rec {
+        fn record_401(&self, consumer: kigi_sampler::SamplingConsumer, prefix: Option<&str>) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((consumer, prefix.map(|s| s.to_string())));
+        }
+    }
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+        let caps = FusionCaptures::default();
+        let rec = Arc::new(Rec::default());
+        let server = MockServer::spawn(fusion_app(
+            caps.clone(),
+            (status, b"unauthorized".to_vec()),
+            Vec::new(),
+        ))
+        .await;
+        let mut cfg = devin_config(
+            server.base_url(),
+            "fusion-claude-test-medium-sidekick-swe-test-medium",
+        );
+        cfg.attribution_callback = Some(rec.clone());
+        let client = SamplingClient::new(cfg).expect("client");
+        let Err(err) = client
+            .conversation_stream_messages(fusion_conversation())
+            .await
+        else {
+            panic!("assign {status} must error");
+        };
+        assert!(
+            matches!(err, kigi_sampling_types::SamplingError::Auth(_)),
+            "{status} maps to Auth"
+        );
+        assert_eq!(
+            *caps.chat_hits.lock().unwrap(),
+            0,
+            "no chat after assign {status}"
+        );
+        let calls = rec.0.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|(c, p)| *c == kigi_sampler::SamplingConsumer::DevinStream
+                    && p.as_deref() == Some(&"tok-construction"[..12])),
+            "attribution carries the fake token's prefix: {calls:?}"
+        );
+        server.shutdown_tx.send(()).ok();
+    }
+}
+
+#[tokio::test]
+async fn devin_fusion_missing_or_echoed_assignment_fails_before_chat() {
+    for body in [
+        devin::AssignModelResponse { assignment: None }.encode_to_vec(),
+        fusion_assign_body("", "claude-test-medium"),
+        fusion_assign_body("   ", "claude-test-medium"),
+        fusion_assign_body("FAKE-ASSIGN-JWT", ""),
+        fusion_assign_body("FAKE-ASSIGN-JWT", "   "),
+        fusion_assign_body(
+            "FAKE-ASSIGN-JWT",
+            "fusion-claude-test-medium-sidekick-swe-test-medium",
+        ),
+        fusion_assign_body("FAKE-ASSIGN-JWT", "fusion-other-lead-sidekick-other-helper"),
+        fusion_assign_body("FAKE-ASSIGN-JWT", "fusion-unpaired"),
+    ] {
+        let caps = FusionCaptures::default();
+        let server =
+            MockServer::spawn(fusion_app(caps.clone(), (StatusCode::OK, body), Vec::new())).await;
+        let client = SamplingClient::new(devin_config(
+            server.base_url(),
+            "fusion-claude-test-medium-sidekick-swe-test-medium",
+        ))
+        .expect("client");
+        let Err(err) = client
+            .conversation_stream_messages(fusion_conversation())
+            .await
+        else {
+            panic!("bad assignment must error");
+        };
+        assert!(matches!(
+            err,
+            kigi_sampling_types::SamplingError::Api { .. }
+                | kigi_sampling_types::SamplingError::Auth(_)
+        ));
+        assert_eq!(*caps.chat_hits.lock().unwrap(), 0);
+        server.shutdown_tx.send(()).ok();
+    }
+}
+
+#[tokio::test]
+async fn devin_fusion_assign_redirect_is_never_followed() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let decoy_hits = Arc::new(AtomicU32::new(0));
+    let decoy_hits2 = decoy_hits.clone();
+    let decoy = Router::new().route(
+        "/",
+        post(move || {
+            let hits = decoy_hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::OK, "decoy reached")
+            }
+        }),
+    );
+    let decoy_server = MockServer::spawn(decoy).await;
+    let decoy_url = decoy_server.base_url();
+    let chat_hits = Arc::new(AtomicU32::new(0));
+    let chat_hits2 = chat_hits.clone();
+    let app = Router::new()
+        .route(
+            devin::GET_USER_JWT_PATH,
+            post(move |body: axum::body::Bytes| async move {
+                let req = devin::GetUserJwtRequest::decode(&body[..]).expect("decode jwt");
+                let _ = req;
+                let resp = devin::GetUserJwtResponse {
+                    user_jwt: "jwt-fresh".to_string(),
+                    custom_api_server_url: String::new(),
+                };
+                (StatusCode::OK, resp.encode_to_vec())
+            }),
+        )
+        .route(
+            devin::ASSIGN_MODEL_PATH,
+            post(move || {
+                let loc = format!("{}/", decoy_url);
+                async move { (StatusCode::FOUND, [(axum::http::header::LOCATION, loc)]) }
+            }),
+        )
+        .route(
+            devin::GET_CHAT_MESSAGE_PATH,
+            post(move || {
+                let hits = chat_hits2.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::OK, Vec::<u8>::new())
+                }
+            }),
+        );
+    let server = MockServer::spawn(app).await;
+    let client = SamplingClient::new(devin_config(
+        server.base_url(),
+        "fusion-claude-test-medium-sidekick-swe-test-medium",
+    ))
+    .expect("client");
+    let Err(err) = client
+        .conversation_stream_messages(fusion_conversation())
+        .await
+    else {
+        panic!("assign redirect must error");
+    };
+    assert!(matches!(
+        err,
+        kigi_sampling_types::SamplingError::Api { .. }
+    ));
+    assert_eq!(
+        decoy_hits.load(Ordering::SeqCst),
+        0,
+        "redirect target never fetched"
+    );
+    assert_eq!(chat_hits.load(Ordering::SeqCst), 0, "no chat after 302");
+    server.shutdown_tx.send(()).ok();
+    decoy_server.shutdown_tx.send(()).ok();
+}
+
+#[tokio::test]
+async fn devin_non_fusion_model_never_calls_assign_model() {
+    let caps = FusionCaptures::default();
+    let server = MockServer::spawn(fusion_app(
+        caps.clone(),
+        (StatusCode::OK, b"unused".to_vec()),
+        collect_stream(),
+    ))
+    .await;
+    let client =
+        SamplingClient::new(devin_config(server.base_url(), "MODEL_SWE_17")).expect("client");
+    let (raw, _meta) = client
+        .conversation_stream_messages(conversation())
+        .await
+        .expect("stream");
+    let _ = kigi_sampler::collect_response(kigi_sampler::stream_messages(
+        raw,
+        None,
+        kigi_sampler::RequestId::random(),
+        std::time::Duration::from_secs(30),
+    ))
+    .await
+    .expect("collect");
+    assert_eq!(
+        *caps.assign_hits.lock().unwrap(),
+        0,
+        "ordinary models skip AssignModel"
+    );
+    let chat = caps
+        .chat_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("chat request");
+    assert!(chat.model_assignment_jwt.is_none());
+    assert!(!chat.prompt.contains("Fusion"));
+    server.shutdown_tx.send(()).ok();
+}

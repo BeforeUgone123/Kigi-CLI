@@ -60,6 +60,27 @@ pub(crate) fn model_family(
     (!family.id.is_empty() && !family.name.is_empty()).then_some(family)
 }
 
+pub(crate) fn native_fusion(
+    info: &acp::ModelInfo,
+) -> Option<kigi_shell::agent::config::ModelFusionInfo> {
+    let pair_uid = info.model_id.0.as_ref().strip_prefix("devin/")?;
+    let (lead_uid, helper_uid) = kigi_shell::sampling::devin::fusion_model_uids(pair_uid)?;
+    let value = info.meta.as_ref()?.get("fusion")?;
+    let mut fusion: kigi_shell::agent::config::ModelFusionInfo =
+        serde_json::from_value(value.clone()).ok()?;
+    fusion.lead = fusion.lead.trim().to_string();
+    fusion.sidekick = fusion.sidekick.trim().to_string();
+    fusion.lead_model = fusion.lead_model.trim().to_string();
+    fusion.sidekick_model = fusion.sidekick_model.trim().to_string();
+    (fusion.lead_model == lead_uid
+        && fusion.sidekick_model == helper_uid
+        && !fusion.lead.is_empty()
+        && !fusion.sidekick.is_empty()
+        && !fusion.lead_model.is_empty()
+        && !fusion.sidekick_model.is_empty())
+    .then_some(fusion)
+}
+
 pub(crate) fn model_variant_name<'a>(
     info: &'a acp::ModelInfo,
     family: &kigi_shell::agent::config::ModelFamilyInfo,
@@ -1035,6 +1056,86 @@ mod tests {
                 .map(|m| m.0.to_string()),
             Some("claude-pro-max/opus".to_string()),
             "concrete id still resolves even though family meta is ignored"
+        );
+    }
+
+    fn fusion_model(
+        id: &str,
+        name: &str,
+        lead: &str,
+        sidekick: &str,
+        lead_model: &str,
+        sidekick_model: &str,
+    ) -> acp::ModelInfo {
+        let mid = acp::ModelId::new(Arc::from(id));
+        acp::ModelInfo::new(mid, name.to_string()).meta(
+            serde_json::json!({
+                "fusion": {
+                    "lead": lead, "sidekick": sidekick,
+                    "leadModel": lead_model, "sidekickModel": sidekick_model,
+                },
+            })
+            .as_object()
+            .cloned(),
+        )
+    }
+
+    #[test]
+    fn native_fusion_parses_only_complete_devin_meta() {
+        let model = fusion_model(
+            "devin/fusion-a-sidekick-b",
+            "Fusion (A + B)",
+            "A",
+            "B",
+            "a",
+            "b",
+        );
+        let pair = native_fusion(&model).expect("native fusion parsed");
+        assert_eq!(pair.lead_model, "a");
+        assert_eq!(pair.sidekick_model, "b");
+
+        let foreign = fusion_model("fusion-a-b", "Fusion (A + B)", "A", "B", "a", "b");
+        assert!(
+            native_fusion(&foreign).is_none(),
+            "non-devin id is never native fusion"
+        );
+
+        let mut incomplete = model.clone();
+        incomplete.meta = serde_json::json!({"fusion": {"lead": "A", "sidekick": "B"}})
+            .as_object()
+            .cloned();
+        assert!(
+            native_fusion(&incomplete).is_none(),
+            "missing leadModel → None"
+        );
+
+        let mut blank = model.clone();
+        blank.meta = serde_json::json!({
+            "fusion": {"lead": " ", "sidekick": "B", "leadModel": "a", "sidekickModel": "b"}
+        })
+        .as_object()
+        .cloned();
+        assert!(native_fusion(&blank).is_none(), "blank lead → None");
+
+        let mut mismatched = model.clone();
+        mismatched.meta = serde_json::json!({
+            "fusion": {
+                "lead": "A", "sidekick": "B",
+                "leadModel": "zzz", "sidekickModel": "b",
+            }
+        })
+        .as_object()
+        .cloned();
+        assert!(
+            native_fusion(&mismatched).is_none(),
+            "DTO disagreeing with the pair uid is ignored"
+        );
+
+        let mut forged = model.clone();
+        forged.model_id = acp::ModelId::new(Arc::from("devin/plain-model"));
+        assert!(
+            native_fusion(&forged).is_none(),
+            "ordinary devin uid carrying forged fusion meta is ignored"
         );
     }
 }
