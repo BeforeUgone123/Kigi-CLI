@@ -494,6 +494,18 @@ client-side, no backend surface.
     (nested `ModelInfo` wins context/capabilities; disabled, blank-uid,
     router, and features-declared-no-tool-calls rows excluded; each concrete
     UID stays separately selectable — no AssignModel, no effort collapsing).
+    FAMILIES ride `ClientModelConfig.model_family_metadata` (tag 30),
+    `is_default_model_in_family` (tag 31), and `ModelInfo.model_family_uid`
+    (tag 23) → `WireModel.model_family` → stored `ModelEntryConfig` /
+    `ModelInfo` → ACP `_meta.modelFamily` (`{id,name,isDefault}`; the TUI
+    consumes `kigi_shell::agent::config::ModelFamilyInfo`, re-exported, and
+    trusts the meta only on `devin/`-prefixed ids). The `/model` picker and
+    `kigi models` collapse multi-member families to one header row; family
+    name / `devin/<family.id>` / `devin/<family.name>` aliases resolve the
+    flagged default variant (first member when unflagged), while exact
+    concrete ids and full variant names always win. The Devin component of
+    the models disk-cache origin is suffixed `#model-families-v1` so
+    pre-family cached catalogs refetch.
     STREAMING: `DevinEventTranslator` emits Anthropic-Messages events so the
     existing `stream_messages` L2 keeps reasoning/tool/usage/cancel/idle
     semantics; `message_stop` only after a valid end trailer (error trailers
@@ -689,3 +701,29 @@ client-side, no backend surface.
 - M2: server-side search/fetch (F5), command parity with kimi-cli 1.49.0
   (F6), one-time `~/.kimi/config.toml` import (F7), F9 smoke list, perf CI.
 - M3: GitHub Releases distribution, install scripts, self-update (F8).
+
+## Native Devin release smoke (5e4da82)
+
+The Linux x86_64 `v0.1.20-native-devin.1` release binary was exercised
+against an isolated loopback Connect/protobuf mock, without Rust compilation
+or real account credentials. Catalog filtering and the explicitly authenticated
+ACP `devin` path completed a local `read_file` tool loop and streamed a final
+answer. The recorded assertions above remain mock-based; separately, the user
+has confirmed real Devin login and direct inference work interactively.
+
+Known issues observed in this release:
+- A profile containing only `oauth/devin` can discover its model catalog, but
+  headless `-p` exits with the Kimi-oriented "Not signed in" error before any
+  inference RPC. The eager/default authentication gate does not adopt the
+  provider's cached session.
+- The standalone `kigi login` command still runs Kimi Code login, not the
+  provider picker. Native Devin login is exposed by the built-in Kigi agent's
+  login picker / `/login`; do not describe `kigi login` as a Devin picker.
+- A session-title auxiliary request carried `kimi-for-coding` as its Devin
+  model UID even though that UID was absent from the mock account catalog.
+  Production acceptance of that UID has not been verified.
+- `kigi models` displays "You are not authenticated" with this Devin-only
+  profile even while successfully listing the authenticated Devin catalog.
+- A chat stream missing its Connect end trailer was retried and did not return
+  a final prompt result within the 45-second smoke-test window. No successful
+  completion was observed, but a bounded failure was not established.

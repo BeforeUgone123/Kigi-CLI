@@ -119,6 +119,21 @@ pub(crate) fn devin_configs_to_wire_models(
             .filter(|v| *v > 0)
             .map(|v| v as u64)
             .unwrap_or_else(|| context.min(64_000));
+        let model_family = cfg.model_family_metadata.as_ref().and_then(|m| {
+            let name = m.model_family_label.trim();
+            (!name.is_empty()).then(|| {
+                let uid_key = info
+                    .map(|i| i.model_family_uid.trim())
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or(name);
+                kigi_models::ModelFamilyInfo {
+                    id: uid_key.to_string(),
+                    name: name.to_string(),
+                    is_default: cfg.is_default_model_in_family || m.is_default_model_in_family,
+                }
+            })
+        });
+        let label = cfg.label.trim();
         out.push(WireModel {
             id: uid.to_string(),
             context_length: context,
@@ -127,10 +142,11 @@ pub(crate) fn devin_configs_to_wire_models(
                 .map(|f| f.supports_images)
                 .unwrap_or(cfg.supports_images),
             supports_video_in: false,
-            display_name: (!cfg.label.is_empty()).then(|| cfg.label.clone()),
+            display_name: (!label.is_empty()).then(|| label.to_string()),
             max_output_tokens: max_output,
             supports_thinking_type: None,
             think_efforts: None,
+            model_family,
         });
     }
     Ok(out)
@@ -257,5 +273,111 @@ mod tests {
         let decoded: devin::GetCliModelConfigsResponse = devin::decode_unary(&gz).expect("gunzip");
         let models = devin_configs_to_wire_models(decoded).expect("project");
         assert_eq!(models[0].id, "MODEL_GZIP");
+    }
+
+    fn with_family(
+        uid: &str,
+        label: &str,
+        family_uid: &str,
+        family_label: &str,
+        cfg_default: bool,
+        meta_default: bool,
+    ) -> devin::ClientModelConfig {
+        devin::ClientModelConfig {
+            model_uid: uid.to_string(),
+            label: label.to_string(),
+            is_default_model_in_family: cfg_default,
+            model_info: Some(devin::ModelInfo {
+                model_family_uid: family_uid.to_string(),
+                ..Default::default()
+            }),
+            model_family_metadata: Some(devin::ModelFamilyMetadata {
+                model_family_label: family_label.to_string(),
+                is_default_model_in_family: meta_default,
+                entries: vec![],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn family_members_all_stay_selectable_and_default_comes_from_either_flag() {
+        let resp = devin::GetCliModelConfigsResponse {
+            client_model_configs: vec![
+                with_family("MODEL_SW_HIGH", "SWE-2 High", "swe-2", "SWE-2", false, true),
+                with_family(
+                    "MODEL_SW_MED",
+                    "SWE-2 Medium",
+                    "swe-2",
+                    "SWE-2",
+                    true,
+                    false,
+                ),
+                with_family("MODEL_SW_MAX", "SWE-2 Max", "swe-2", "SWE-2", false, false),
+            ],
+        };
+        let models = devin_configs_to_wire_models(resp).expect("project");
+        assert_eq!(models.len(), 3, "every variant stays selectable");
+        assert!(models.iter().all(|m| {
+            m.model_family
+                .as_ref()
+                .is_some_and(|f| f.id == "swe-2" && f.name == "SWE-2")
+        }));
+        assert!(models[0].model_family.as_ref().unwrap().is_default);
+        assert!(models[1].model_family.as_ref().unwrap().is_default);
+        assert!(!models[2].model_family.as_ref().unwrap().is_default);
+    }
+
+    #[test]
+    fn family_uid_falls_back_to_label_and_blank_metadata_yields_none() {
+        let mut no_uid = with_family("MODEL_A", "Opus A", "", "  Opus 5  ", false, false);
+        no_uid.label = " Opus A ".into();
+        let no_meta = devin::ClientModelConfig {
+            model_uid: "MODEL_B".into(),
+            ..Default::default()
+        };
+        let blank_meta = devin::ClientModelConfig {
+            model_uid: "MODEL_C".into(),
+            model_family_metadata: Some(devin::ModelFamilyMetadata {
+                model_family_label: "   ".into(),
+                entries: vec![],
+                is_default_model_in_family: false,
+            }),
+            ..Default::default()
+        };
+        let resp = devin::GetCliModelConfigsResponse {
+            client_model_configs: vec![no_uid, no_meta, blank_meta],
+        };
+        let models = devin_configs_to_wire_models(resp).expect("project");
+        let fam = models[0].model_family.as_ref().expect("family present");
+        assert_eq!(fam.id, "Opus 5", "blank family_uid falls back to label");
+        assert_eq!(fam.name, "Opus 5", "label trimmed");
+        assert_eq!(models[0].display_name.as_deref(), Some("Opus A"));
+        assert!(models[1].model_family.is_none(), "absent metadata → None");
+        assert!(models[2].model_family.is_none(), "blank label → None");
+    }
+
+    #[test]
+    fn families_sharing_a_name_prefix_do_not_merge() {
+        let resp = devin::GetCliModelConfigsResponse {
+            client_model_configs: vec![
+                with_family("MODEL_SW_A", "SWE-2 A", "swe-2", "SWE-2", false, false),
+                with_family(
+                    "MODEL_SWP_B",
+                    "SWE-2 Pro B",
+                    "swe-2-pro",
+                    "SWE-2 Pro",
+                    false,
+                    false,
+                ),
+            ],
+        };
+        let models = devin_configs_to_wire_models(resp).expect("project");
+        assert_eq!(models[0].model_family.as_ref().unwrap().id, "swe-2");
+        assert_eq!(models[1].model_family.as_ref().unwrap().id, "swe-2-pro");
+        assert_ne!(
+            models[0].model_family.as_ref().unwrap().id,
+            models[1].model_family.as_ref().unwrap().id
+        );
     }
 }

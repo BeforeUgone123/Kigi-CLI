@@ -106,12 +106,18 @@ You get whatever models your plan actually serves — the list is fetched at
 sign-in, not hardcoded. (ChatGPT/Codex is the exception: its backend publishes
 no model endpoint, so those four are compiled in.)
 
-**Devin.** `kigi login` → **Devin (subscription)** opens the browser once;
-the session token lives under `oauth/devin` and drives Devin's own model
-catalog. Pick a model with `/model` (the picker lists the concrete catalog
-rows as `devin/<uid>`), or `/model devin/<catalog-uid>` directly. Kigi runs
-the agent — tools, sessions, graph, and swarm stay local; Devin serves
-inference only.
+**Devin.** Sign in through the built-in Kigi agent's `/login` provider
+picker → **Devin (subscription)**, which opens the browser once; the
+session token lives under `oauth/devin` and drives Devin's own model
+catalog. (The standalone `kigi login` command remains Kimi Code sign-in.)
+Devin serves *model families* — a named family (e.g. `SWE-2`) with several
+selectable variants — so `/model` shows one row per family and Enter opens
+its variant list, where each row inserts the exact `devin/<uid>` catalog
+id. A bare family name (`/model SWE-2`, `/model devin/swe-2`) selects the
+provider-flagged default variant; every concrete id —
+`/model devin/<catalog-uid>` — and each variant's full display name still
+work directly. Kigi runs the agent — tools, sessions, graph, and swarm
+stay local; Devin serves inference only.
 
 **API-key providers.** Export the env var, or drop the key in
 `~/.kigi/config.toml`. Keys are never logged.

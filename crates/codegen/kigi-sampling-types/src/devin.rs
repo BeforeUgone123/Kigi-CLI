@@ -177,6 +177,12 @@ pub struct ClientModelConfig {
     pub model_uid: String,
     #[prost(message, optional, tag = "23")]
     pub model_info: Option<ModelInfo>,
+    #[prost(string, optional, tag = "27")]
+    pub description: Option<String>,
+    #[prost(message, optional, tag = "30")]
+    pub model_family_metadata: Option<ModelFamilyMetadata>,
+    #[prost(bool, tag = "31")]
+    pub is_default_model_in_family: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -189,8 +195,36 @@ pub struct ModelInfo {
     pub max_output_tokens: i32,
     #[prost(string, tag = "17")]
     pub model_uid: String,
+    #[prost(string, tag = "23")]
+    pub model_family_uid: String,
     #[prost(bool, tag = "25")]
     pub is_model_router: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ModelFamilyMetadataValue {
+    #[prost(int32, tag = "1")]
+    pub order: i32,
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ModelFamilyMetadataEntry {
+    #[prost(string, tag = "1")]
+    pub key: String,
+    #[prost(message, optional, tag = "2")]
+    pub value: Option<ModelFamilyMetadataValue>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ModelFamilyMetadata {
+    #[prost(string, tag = "1")]
+    pub model_family_label: String,
+    #[prost(message, repeated, tag = "2")]
+    pub entries: Vec<ModelFamilyMetadataEntry>,
+    #[prost(bool, tag = "3")]
+    pub is_default_model_in_family: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -2256,5 +2290,108 @@ mod tests {
             )
         });
         assert!(!has_sig, "redacted thinking must not emit a signature");
+    }
+
+    #[test]
+    fn catalog_family_metadata_roundtrips_at_wire_tags() {
+        let cfg = ClientModelConfig {
+            model_uid: "MODEL_SW_2_HIGH".into(),
+            label: "SWE-2 High".into(),
+            description: Some("frontier coding".into()),
+            is_default_model_in_family: true,
+            model_info: Some(ModelInfo {
+                model_family_uid: "swe-2".into(),
+                ..Default::default()
+            }),
+            model_family_metadata: Some(ModelFamilyMetadata {
+                model_family_label: "SWE-2".into(),
+                is_default_model_in_family: false,
+                entries: vec![ModelFamilyMetadataEntry {
+                    key: "variant".into(),
+                    value: Some(ModelFamilyMetadataValue {
+                        order: 2,
+                        name: "High".into(),
+                    }),
+                }],
+            }),
+            ..Default::default()
+        };
+        let resp = GetCliModelConfigsResponse {
+            client_model_configs: vec![cfg],
+        };
+        let decoded: GetCliModelConfigsResponse =
+            decode_unary(&resp.encode_to_vec()).expect("roundtrip");
+        let d = &decoded.client_model_configs[0];
+        assert_eq!(d.description.as_deref(), Some("frontier coding"));
+        assert!(d.is_default_model_in_family);
+        let meta = d.model_family_metadata.as_ref().expect("metadata");
+        assert_eq!(meta.model_family_label, "SWE-2");
+        assert!(!meta.is_default_model_in_family);
+        assert_eq!(meta.entries.len(), 1);
+        assert_eq!(meta.entries[0].key, "variant");
+        let v = meta.entries[0].value.as_ref().expect("entry value");
+        assert_eq!(v.order, 2);
+        assert_eq!(v.name, "High");
+        let info = d.model_info.as_ref().expect("model info");
+        assert_eq!(info.model_family_uid, "swe-2");
+    }
+
+    #[test]
+    fn catalog_absent_family_metadata_stays_absent() {
+        let resp = GetCliModelConfigsResponse {
+            client_model_configs: vec![ClientModelConfig {
+                model_uid: "MODEL_PLAIN".into(),
+                ..Default::default()
+            }],
+        };
+        let decoded: GetCliModelConfigsResponse =
+            decode_unary(&resp.encode_to_vec()).expect("roundtrip");
+        let d = &decoded.client_model_configs[0];
+        assert!(d.model_family_metadata.is_none());
+        assert!(!d.is_default_model_in_family);
+        assert!(d.description.is_none());
+        let blank_meta = ClientModelConfig {
+            model_uid: "MODEL_BLANK".into(),
+            model_family_metadata: Some(ModelFamilyMetadata {
+                model_family_label: "   ".into(),
+                entries: vec![],
+                is_default_model_in_family: false,
+            }),
+            ..Default::default()
+        };
+        let resp2 = GetCliModelConfigsResponse {
+            client_model_configs: vec![blank_meta],
+        };
+        let d2: GetCliModelConfigsResponse =
+            decode_unary(&resp2.encode_to_vec()).expect("roundtrip");
+        assert_eq!(
+            d2.client_model_configs[0]
+                .model_family_metadata
+                .as_ref()
+                .map(|m| m.model_family_label.trim().is_empty()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn catalog_family_fields_decode_at_exact_wire_tags() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&[0xb2, 0x01, 0x01, 0x61]);
+        wire.extend_from_slice(&[0xf2, 0x01, 0x03, 0x0a, 0x01, 0x46]);
+        wire.extend_from_slice(&[0xf8, 0x01, 0x01]);
+        wire.extend_from_slice(&[0xba, 0x01, 0x04, 0xba, 0x01, 0x01, 0x66]);
+        let cfg = ClientModelConfig::decode(&wire[..]).expect("decode raw fixture");
+        assert_eq!(cfg.model_uid, "a");
+        assert_eq!(
+            cfg.model_family_metadata
+                .as_ref()
+                .map(|m| m.model_family_label.as_str()),
+            Some("F")
+        );
+        assert!(cfg.is_default_model_in_family);
+        assert_eq!(
+            cfg.model_info.as_ref().map(|i| i.model_family_uid.as_str()),
+            Some("f")
+        );
     }
 }

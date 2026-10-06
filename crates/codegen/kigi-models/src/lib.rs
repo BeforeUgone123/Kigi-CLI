@@ -1654,6 +1654,7 @@ fn codex_wire_model(slug: &str, display_name: &str, efforts: &[&str], default: &
             valid_efforts: efforts.iter().map(|s| (*s).to_string()).collect(),
             default_effort: Some(default.to_string()),
         }),
+        model_family: None,
     }
 }
 
@@ -1789,6 +1790,17 @@ pub struct WireModel {
     /// them (e.g. K3). Verified against the live `/models` response.
     #[serde(default)]
     pub think_efforts: Option<WireThinkEfforts>,
+    #[serde(default)]
+    pub model_family: Option<ModelFamilyInfo>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFamilyInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 /// The `think_efforts` object of a `/models` entry. Live wire shape
@@ -1818,6 +1830,7 @@ impl WireModel {
             max_output_tokens: 0,
             supports_thinking_type: None,
             think_efforts: None,
+            model_family: None,
         }
     }
 }
@@ -1965,6 +1978,7 @@ pub fn parse_anthropic_listing(json: &str) -> Result<Vec<WireModel>, serde_json:
                 max_output_tokens: m.max_tokens,
                 supports_thinking_type: None,
                 think_efforts,
+                model_family: None,
             }
         })
         .collect())
@@ -2172,6 +2186,7 @@ pub fn parse_github_copilot_listing(json: &str) -> Result<Vec<WireModel>, serde_
             max_output_tokens: 0,
             supports_thinking_type: None,
             think_efforts: None,
+            model_family: None,
         })
         .collect();
     Ok(kept)
@@ -3165,6 +3180,7 @@ mod tests {
                 max_output_tokens: 0,
                 supports_thinking_type: None,
                 think_efforts: None,
+                model_family: None,
             },
             WireModel {
                 id: "moonshot-v1-8k".into(),
@@ -3176,6 +3192,7 @@ mod tests {
                 max_output_tokens: 0,
                 supports_thinking_type: None,
                 think_efforts: None,
+                model_family: None,
             },
         ];
         let filtered = filter_allowed_models(PlatformId::MoonshotCn, listing.clone());
