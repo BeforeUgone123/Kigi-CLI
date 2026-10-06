@@ -114,9 +114,11 @@ pub(crate) fn models_fetch_origin(
             let parts: Vec<String> = enabled_platforms(has_oauth, oauth_tokens, platform_keys)
                 .into_iter()
                 .map(|p| {
-                    let marker = (p == kigi_models::PlatformId::Devin)
-                        .then_some("#model-families-fusion-v2")
-                        .unwrap_or("");
+                    let marker = if p == kigi_models::PlatformId::Devin {
+                        "#model-families-fusion-v2"
+                    } else {
+                        ""
+                    };
                     format!(
                         "{}={}{}",
                         p.as_str(),

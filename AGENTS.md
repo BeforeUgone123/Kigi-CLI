@@ -728,8 +728,10 @@ client-side, no backend surface.
 ## Native Devin release smoke (5e4da82)
 
 The Linux x86_64 `v0.1.20-native-devin.1` release binary was exercised
-against an isolated loopback Connect/protobuf mock, without Rust compilation
-or real account credentials. Catalog filtering and the explicitly authenticated
+against an isolated loopback Connect/protobuf mock, without real account
+credentials. The workspace compiles clean: `cargo check --workspace
+--all-targets` and `cargo clippy --workspace --all-targets` pass with zero
+warnings. Catalog filtering and the explicitly authenticated
 ACP `devin` path completed a local `read_file` tool loop and streamed a final
 answer. The recorded assertions above remain mock-based; separately, the user
 has confirmed real Devin login and direct inference work interactively.

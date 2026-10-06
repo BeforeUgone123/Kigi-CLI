@@ -165,12 +165,12 @@ fn detect_native_fusion_phase(models: &ModelState, args_query: &str) -> Option<S
 }
 
 /// The native fusion pairs in the catalog — `(model_id, info, fusion dto)`.
-fn fusion_entries<'a>(
-    models: &'a ModelState,
+fn fusion_entries(
+    models: &ModelState,
 ) -> impl Iterator<
     Item = (
-        &'a acp::ModelId,
-        &'a acp::ModelInfo,
+        &acp::ModelId,
+        &acp::ModelInfo,
         kigi_shell::agent::config::ModelFusionInfo,
     ),
 > {

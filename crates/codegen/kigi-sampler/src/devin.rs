@@ -81,7 +81,7 @@ impl SamplingClient {
         let jwt_resp: devin::GetUserJwtResponse =
             devin::decode_unary(&body).map_err(devin::DevinWireError::into_sampling_error)?;
         let custom = jwt_resp.custom_api_server_url.trim();
-        if !custom.is_empty() && !custom_eq_base(custom, &base) {
+        if !custom.is_empty() && !custom_eq_base(custom, base) {
             return Err(SamplingError::Api {
                 status: reqwest::StatusCode::BAD_GATEWAY,
                 message:
