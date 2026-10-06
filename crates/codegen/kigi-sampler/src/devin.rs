@@ -14,6 +14,11 @@ const DEVIN_FUSION_PROMPT: &str = "Native Devin Fusion is active. Configured lea
      concurrency limits still apply. Do not claim delegation occurred unless a subagent was \
      actually started and its result received.";
 
+/// Bound on the wait for `GetChatMessage` response headers, matching the
+/// sampler's default stream idle window. Never a total request timeout: the
+/// body must stay free to stream for as long as chunks keep arriving.
+const DEVIN_CHAT_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn devin_http_client() -> Result<reqwest::Client> {
     static CELL: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     if let Some(client) = CELL.get() {
@@ -192,7 +197,7 @@ impl SamplingClient {
             base.trim_end_matches('/'),
             devin::GET_CHAT_MESSAGE_PATH
         );
-        let resp = client
+        let send = client
             .post(&chat_url)
             .header(
                 reqwest::header::CONTENT_TYPE,
@@ -205,8 +210,12 @@ impl SamplingClient {
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .header("connect-accept-encoding", "gzip")
             .body(body)
-            .send()
+            .send();
+        let resp = tokio::time::timeout(DEVIN_CHAT_HEADER_TIMEOUT, send)
             .await
+            .map_err(|_| SamplingError::IdleTimeout {
+                elapsed_secs: DEVIN_CHAT_HEADER_TIMEOUT.as_secs(),
+            })?
             .map_err(SamplingError::Http)?;
         let resp = self.check_devin_status(resp, &session_token).await?;
 
