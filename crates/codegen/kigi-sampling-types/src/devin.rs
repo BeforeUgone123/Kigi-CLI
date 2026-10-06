@@ -65,6 +65,8 @@ pub enum DevinWireError {
     Trailer { code: String, status: u16 },
     #[error("unsupported request element for the devin wire: {0}")]
     Unsupported(&'static str),
+    #[error("invalid devin tool-call stream: {0}")]
+    MalformedToolCall(&'static str),
     #[error("stop_reason=error reported by the devin stream")]
     ModelError,
 }
@@ -82,6 +84,9 @@ impl DevinWireError {
                 model_metadata: None,
                 retry_after_secs: None,
             },
+            e @ (Self::Unsupported(_) | Self::MalformedToolCall(_)) => {
+                SamplingError::serialization_message(e.to_string())
+            }
             Self::ModelError => SamplingError::Api {
                 status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                 message: "Devin stream reported stop_reason=error".to_string(),
@@ -254,6 +259,12 @@ pub struct ChatToolCall {
     pub name: String,
     #[prost(string, tag = "3")]
     pub arguments_json: String,
+    #[prost(string, tag = "4")]
+    pub invalid_json_str: String,
+    #[prost(string, tag = "5")]
+    pub invalid_json_err: String,
+    #[prost(bool, tag = "6")]
+    pub is_custom_tool_call: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -963,6 +974,7 @@ pub fn build_devin_chat_request(
                         id: tc.id.as_ref().to_owned(),
                         name: tc.name.clone(),
                         arguments_json: tc.arguments.as_ref().to_owned(),
+                        ..Default::default()
                     })
                     .collect();
 
@@ -1139,6 +1151,7 @@ enum LeafKind {
 }
 
 struct ToolBlock {
+    id: String,
     name: String,
     args_acc: String,
 }
@@ -1150,7 +1163,8 @@ pub struct DevinEventTranslator {
     tool_blocks: std::collections::BTreeMap<u32, ToolBlock>,
     tool_index_by_id: std::collections::HashMap<String, u32>,
     tool_order: Vec<u32>,
-    active_tool_id: Option<String>,
+    active_tool_slot: Option<u32>,
+    nonce: u128,
     thinking_signature: String,
     thinking_signature_type: String,
     thinking_redacted: bool,
@@ -1167,7 +1181,11 @@ impl DevinEventTranslator {
             tool_blocks: std::collections::BTreeMap::new(),
             tool_index_by_id: std::collections::HashMap::new(),
             tool_order: Vec::new(),
-            active_tool_id: None,
+            active_tool_slot: None,
+            nonce: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
             thinking_signature: String::new(),
             thinking_signature_type: String::new(),
             thinking_redacted: false,
@@ -1247,24 +1265,33 @@ impl DevinEventTranslator {
         index
     }
 
-    fn fold_tool_args(&mut self, index: u32, incoming: &str) -> Option<String> {
-        let block = self.tool_blocks.get_mut(&index)?;
-        if incoming.is_empty() || incoming == block.args_acc {
-            return None;
-        }
-        let (delta, acc) = if incoming.starts_with(&block.args_acc) {
-            (
-                incoming[block.args_acc.len()..].to_string(),
-                incoming.to_string(),
-            )
-        } else {
-            (
-                incoming.to_string(),
-                format!("{}{incoming}", block.args_acc),
-            )
+    fn fold_tool_args(&mut self, slot: u32, incoming: &str) {
+        let Some(block) = self.tool_blocks.get_mut(&slot) else {
+            return;
         };
-        block.args_acc = acc;
-        (!delta.is_empty()).then_some(delta)
+        if incoming.is_empty() || incoming == block.args_acc {
+            return;
+        }
+        if incoming.starts_with(&block.args_acc) {
+            block.args_acc = incoming.to_string();
+        } else {
+            block.args_acc = format!("{}{incoming}", block.args_acc);
+        }
+    }
+
+    fn new_tool_slot(&mut self, id: String) -> Result<u32, DevinWireError> {
+        let slot = u32::try_from(self.tool_order.len())
+            .map_err(|_| DevinWireError::MalformedToolCall("too many tool calls"))?;
+        self.tool_order.push(slot);
+        self.tool_blocks.insert(
+            slot,
+            ToolBlock {
+                id,
+                name: String::new(),
+                args_acc: String::new(),
+            },
+        );
+        Ok(slot)
     }
 
     pub fn push_response(
@@ -1303,69 +1330,65 @@ impl DevinEventTranslator {
         }
 
         for call in &response.delta_tool_calls {
+            if call.id.is_empty() && call.name.is_empty() && call.arguments_json.is_empty() {
+                continue;
+            }
             self.close_leaf(&mut events);
-            let id = if call.id.is_empty() {
-                match self.active_tool_id.clone() {
-                    Some(id) if self.tool_index_by_id.len() == 1 => id,
-                    _ => {
-                        return Err(DevinWireError::Unsupported(
-                            "tool-call delta without an id and no unambiguous active call",
-                        ));
+
+            let slot = if !call.id.is_empty() {
+                if let Some(&slot) = self.tool_index_by_id.get(&call.id) {
+                    slot
+                } else if let Some(active) = self.active_tool_slot
+                    && self
+                        .tool_blocks
+                        .get(&active)
+                        .is_some_and(|b| b.id.is_empty())
+                {
+                    if let Some(block) = self.tool_blocks.get_mut(&active) {
+                        block.id = call.id.clone();
                     }
+                    self.tool_index_by_id.insert(call.id.clone(), active);
+                    active
+                } else {
+                    self.new_tool_slot(call.id.clone())?
                 }
             } else {
-                call.id.clone()
-            };
-            let index = match self.tool_index_by_id.get(&id) {
-                Some(index) => {
-                    let started = &self.tool_blocks[index].name;
-                    if !call.name.is_empty() && call.name != *started {
-                        return Err(DevinWireError::Unsupported(
-                            "tool-call id changed name mid-stream",
-                        ));
+                let names_compatible = |stored: &str| {
+                    call.name.is_empty()
+                        || stored.is_empty()
+                        || call.name.starts_with(stored)
+                        || stored.starts_with(&call.name)
+                };
+                match self.active_tool_slot {
+                    Some(active)
+                        if self
+                            .tool_blocks
+                            .get(&active)
+                            .is_some_and(|b| names_compatible(&b.name)) =>
+                    {
+                        active
                     }
-                    *index
-                }
-                None => {
-                    if call.name.trim().is_empty() {
-                        return Err(DevinWireError::Unsupported(
-                            "tool-call start without a name",
-                        ));
-                    }
-                    let index = self.alloc_index();
-                    self.tool_index_by_id.insert(id.clone(), index);
-                    self.tool_blocks.insert(
-                        index,
-                        ToolBlock {
-                            name: call.name.clone(),
-                            args_acc: String::new(),
-                        },
-                    );
-                    self.tool_order.push(index);
-                    events.push(messages::MessageStreamEvent::ContentBlockStart {
-                        index,
-                        content_block: messages::ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: call.name.clone(),
-                            input: serde_json::Value::Null,
-                        },
-                    });
-                    index
+                    _ => self.new_tool_slot(String::new())?,
                 }
             };
-            if self.tool_index_by_id.len() == 1 {
-                self.active_tool_id = Some(id);
-            } else {
-                self.active_tool_id = None;
+            self.active_tool_slot = Some(slot);
+
+            {
+                let block = self
+                    .tool_blocks
+                    .get_mut(&slot)
+                    .ok_or(DevinWireError::MalformedToolCall("tool-call slot missing"))?;
+                if !call.name.is_empty() && call.name != block.name {
+                    if block.name.is_empty() || call.name.starts_with(&block.name) {
+                        block.name = call.name.clone();
+                    } else if !block.name.starts_with(&call.name) {
+                        return Err(DevinWireError::MalformedToolCall(
+                            "tool-call name changed incompatibly",
+                        ));
+                    }
+                }
             }
-            if let Some(delta) = self.fold_tool_args(index, &call.arguments_json) {
-                events.push(messages::MessageStreamEvent::ContentBlockDelta {
-                    index,
-                    delta: messages::StreamDelta::InputJsonDelta {
-                        partial_json: delta,
-                    },
-                });
-            }
+            self.fold_tool_args(slot, &call.arguments_json);
         }
 
         if response.stop_reason != 0 {
@@ -1382,34 +1405,71 @@ impl DevinEventTranslator {
         if self.latest_stop == Some(stop_reason::ERROR) {
             return Err(DevinWireError::ModelError);
         }
-        let mut events = Vec::new();
-        for index in &self.tool_order {
-            let block = &self.tool_blocks[index];
+        for slot in &self.tool_order {
+            let block = &self.tool_blocks[slot];
+            if block.name.trim().is_empty() {
+                return Err(DevinWireError::MalformedToolCall(
+                    "unfinished tool-call metadata",
+                ));
+            }
             let args = block.args_acc.trim();
-            if args.is_empty() {
-                events.push(messages::MessageStreamEvent::ContentBlockDelta {
-                    index: *index,
-                    delta: messages::StreamDelta::InputJsonDelta {
-                        partial_json: "{}".to_string(),
-                    },
-                });
-            } else if !matches!(
-                serde_json::from_str::<serde_json::Value>(args),
-                Ok(serde_json::Value::Object(_))
-            ) {
-                return Err(DevinWireError::MalformedProtobuf);
+            if !args.is_empty()
+                && !matches!(
+                    serde_json::from_str::<serde_json::Value>(args),
+                    Ok(serde_json::Value::Object(_))
+                )
+            {
+                return Err(DevinWireError::MalformedToolCall(
+                    "tool-call arguments must be a JSON object",
+                ));
             }
         }
+        if self.latest_stop == Some(stop_reason::FUNCTION_CALL) && self.tool_order.is_empty() {
+            return Err(DevinWireError::MalformedToolCall(
+                "tool-use stop without a tool call",
+            ));
+        }
+        let has_tools = !self.tool_order.is_empty();
+        let mut events = Vec::new();
         self.close_leaf(&mut events);
-        for index in std::mem::take(&mut self.tool_order) {
+        for slot in std::mem::take(&mut self.tool_order) {
+            let Some(block) = self.tool_blocks.remove(&slot) else {
+                continue;
+            };
+            let index = self.alloc_index();
+            let id = if block.id.trim().is_empty() {
+                format!("devin_call_{:x}_{slot}", self.nonce)
+            } else {
+                block.id
+            };
+            events.push(messages::MessageStreamEvent::ContentBlockStart {
+                index,
+                content_block: messages::ContentBlock::ToolUse {
+                    id,
+                    name: block.name,
+                    input: serde_json::Value::Null,
+                },
+            });
+            let args = block.args_acc.trim();
+            events.push(messages::MessageStreamEvent::ContentBlockDelta {
+                index,
+                delta: messages::StreamDelta::InputJsonDelta {
+                    partial_json: if args.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        args.to_string()
+                    },
+                },
+            });
             events.push(messages::MessageStreamEvent::ContentBlockStop { index });
         }
         self.tool_blocks.clear();
         self.tool_index_by_id.clear();
+        self.active_tool_slot = None;
         let stop = match self.latest_stop.unwrap_or(0) {
             stop_reason::INCOMPLETE | stop_reason::MAX_TOKENS => messages::StopReason::MaxTokens,
-            stop_reason::FUNCTION_CALL => messages::StopReason::ToolUse,
             stop_reason::CONTENT_FILTER => messages::StopReason::Refusal,
+            _ if has_tools => messages::StopReason::ToolUse,
             _ => messages::StopReason::EndTurn,
         };
         events.push(messages::MessageStreamEvent::MessageDelta {
@@ -2155,30 +2215,35 @@ mod tests {
             id: "call_1".into(),
             name: "bash".into(),
             arguments_json: "{\"a\"".into(),
+            ..Default::default()
         }];
         let mut f2 = resp();
         f2.delta_tool_calls = vec![ChatToolCall {
             id: String::new(),
             name: String::new(),
             arguments_json: "{\"a\":1}".into(),
+            ..Default::default()
         }];
         let mut f3 = resp();
         f3.delta_tool_calls = vec![ChatToolCall {
             id: "call_2".into(),
             name: "read".into(),
             arguments_json: "{\"p\":".into(),
+            ..Default::default()
         }];
         let mut f4 = resp();
         f4.delta_tool_calls = vec![ChatToolCall {
             id: "call_2".into(),
             name: String::new(),
             arguments_json: "\"x\"}".into(),
+            ..Default::default()
         }];
         let mut f5 = resp();
         f5.delta_tool_calls = vec![ChatToolCall {
             id: "call_2".into(),
             name: String::new(),
             arguments_json: "{\"p\":\"x\"}".into(),
+            ..Default::default()
         }];
         let mut f6 = resp();
         f6.stop_reason = stop_reason::FUNCTION_CALL;
@@ -2200,7 +2265,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(deltas, vec!["{\"a\"", ":1}", "{\"p\":", "\"x\"}"]);
+        assert_eq!(
+            deltas,
+            vec!["{\"a\":1}", "{\"p\":\"x\"}"],
+            "one full-json delta per buffered call at finish"
+        );
         assert_eq!(
             events
                 .iter()
@@ -2220,15 +2289,31 @@ mod tests {
     }
 
     #[test]
-    fn translator_rejects_orphan_tool_delta_and_bad_final_args() {
+    fn translator_orphan_delta_and_bad_final_args() {
         let mut t = DevinEventTranslator::new("M".to_string());
         let mut f = resp();
         f.delta_tool_calls = vec![ChatToolCall {
             id: String::new(),
             name: "x".into(),
             arguments_json: "{}".into(),
+            ..Default::default()
         }];
-        assert!(t.push_response(&f).is_err(), "orphan tool delta must fail");
+        let mut fend = resp();
+        fend.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f).unwrap();
+        t.push_response(&fend).unwrap();
+        let events = t.finish_success().expect("orphan delta is buffered");
+        let id = events.iter().find_map(|e| match e {
+            messages::MessageStreamEvent::ContentBlockStart {
+                content_block: messages::ContentBlock::ToolUse { id, .. },
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        assert!(
+            id.expect("tool_use").starts_with("devin_call_"),
+            "anonymous calls get a synthesized id"
+        );
 
         let mut t = DevinEventTranslator::new("M".to_string());
         let mut f = resp();
@@ -2236,9 +2321,11 @@ mod tests {
             id: "c1".into(),
             name: "x".into(),
             arguments_json: "{\"truncated".into(),
+            ..Default::default()
         }];
         t.push_response(&f).unwrap();
-        assert!(t.finish_success().is_err());
+        let err = t.finish_success().expect_err("truncated args must fail");
+        assert!(!err.into_sampling_error().is_retryable());
     }
 
     #[test]
@@ -2249,16 +2336,23 @@ mod tests {
             id: "c1".into(),
             name: String::new(),
             arguments_json: "{}".into(),
+            ..Default::default()
         }];
-        assert!(t.push_response(&f).is_err(), "nameless new call must fail");
+        t.push_response(&f).unwrap();
+        assert!(t.finish_success().is_err(), "nameless call fails at finish");
         let mut t = DevinEventTranslator::new("M".to_string());
         let mut f = resp();
         f.delta_tool_calls = vec![ChatToolCall {
             id: "c1".into(),
             name: "   ".into(),
             arguments_json: "{}".into(),
+            ..Default::default()
         }];
-        assert!(t.push_response(&f).is_err(), "whitespace name must fail");
+        t.push_response(&f).unwrap();
+        assert!(
+            t.finish_success().is_err(),
+            "whitespace name fails at finish"
+        );
 
         let mut t = DevinEventTranslator::new("M".to_string());
         let mut f = resp();
@@ -2266,6 +2360,7 @@ mod tests {
             id: "c1".into(),
             name: "bash".into(),
             arguments_json: "{}".into(),
+            ..Default::default()
         }];
         t.push_response(&f).unwrap();
         let mut f = resp();
@@ -2273,6 +2368,7 @@ mod tests {
             id: "c1".into(),
             name: "read".into(),
             arguments_json: String::new(),
+            ..Default::default()
         }];
         assert!(t.push_response(&f).is_err(), "name change must fail");
 
@@ -2283,6 +2379,7 @@ mod tests {
                 id: "c1".into(),
                 name: "bash".into(),
                 arguments_json: args.into(),
+                ..Default::default()
             }];
             t.push_response(&f).unwrap();
             assert!(
@@ -2296,6 +2393,7 @@ mod tests {
             id: "c1".into(),
             name: "bash".into(),
             arguments_json: String::new(),
+            ..Default::default()
         }];
         t.push_response(&f).unwrap();
         let events = t.finish_success().expect("empty args ok");
@@ -2313,7 +2411,6 @@ mod tests {
         for (wire, want) in [
             (stop_reason::INCOMPLETE, messages::StopReason::MaxTokens),
             (stop_reason::MAX_TOKENS, messages::StopReason::MaxTokens),
-            (stop_reason::FUNCTION_CALL, messages::StopReason::ToolUse),
             (stop_reason::CONTENT_FILTER, messages::StopReason::Refusal),
             (stop_reason::STOP_PATTERN, messages::StopReason::EndTurn),
             (0, messages::StopReason::EndTurn),
@@ -2350,6 +2447,17 @@ mod tests {
             t.finish_success(),
             Err(DevinWireError::ModelError)
         ));
+        let mut t = DevinEventTranslator::new("M".to_string());
+        let mut f = resp();
+        f.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f).unwrap();
+        assert!(
+            matches!(
+                t.finish_success(),
+                Err(DevinWireError::MalformedToolCall(_))
+            ),
+            "function_call without any tool call is fatal"
+        );
     }
 
     #[test]
@@ -2624,5 +2732,134 @@ mod tests {
         let wire =
             build_devin_chat_request(&request, "t", "jwt", "MODEL_X", &ids()).expect("build");
         assert!(wire.model_assignment_jwt.is_none());
+    }
+
+    fn tool_delta(id: &str, name: &str, args: &str) -> ChatToolCall {
+        ChatToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments_json: args.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn tool_use_ids(events: &[messages::MessageStreamEvent]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                messages::MessageStreamEvent::ContentBlockStart {
+                    content_block: messages::ContentBlock::ToolUse { id, name, .. },
+                    ..
+                } => Some((id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn translator_idless_continuation_targets_active_tool() {
+        let mut t = DevinEventTranslator::new("M".to_string());
+        let mut f1 = resp();
+        f1.delta_tool_calls = vec![tool_delta("call_1", "bash", "{\"cmd\":\"ls\"}")];
+        t.push_response(&f1).unwrap();
+        let mut f2 = resp();
+        f2.delta_tool_calls = vec![tool_delta("call_2", "read", "{\"path\":")];
+        t.push_response(&f2).unwrap();
+        let mut f3 = resp();
+        f3.delta_tool_calls = vec![tool_delta("", "", "\"f.txt\"}")];
+        t.push_response(&f3).unwrap();
+        let mut f4 = resp();
+        f4.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f4).unwrap();
+        let events = t.finish_success().expect("finish");
+        assert_eq!(
+            tool_use_ids(&events),
+            vec![
+                ("call_1".to_string(), "bash".to_string()),
+                ("call_2".to_string(), "read".to_string()),
+            ],
+            "id-less continuation lands on call_2 even with two calls open"
+        );
+        let args: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                messages::MessageStreamEvent::ContentBlockDelta {
+                    delta: messages::StreamDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(args, vec!["{\"cmd\":\"ls\"}", "{\"path\":\"f.txt\"}"]);
+    }
+
+    #[test]
+    fn translator_late_id_adopts_anonymous_block() {
+        let mut t = DevinEventTranslator::new("M".to_string());
+        let mut f1 = resp();
+        f1.delta_tool_calls = vec![tool_delta("", "", "{\"cmd\":\"ls\"}")];
+        t.push_response(&f1).unwrap();
+        let mut f2 = resp();
+        f2.delta_tool_calls = vec![tool_delta("c9", "bash", "")];
+        t.push_response(&f2).unwrap();
+        let mut f3 = resp();
+        f3.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f3).unwrap();
+        let events = t.finish_success().expect("finish");
+        assert_eq!(
+            tool_use_ids(&events),
+            vec![("c9".to_string(), "bash".to_string())],
+            "late id + name adopt the anonymous block"
+        );
+    }
+
+    #[test]
+    fn translator_idless_incompatible_name_starts_new_call() {
+        let mut t = DevinEventTranslator::new("M".to_string());
+        let mut f1 = resp();
+        f1.delta_tool_calls = vec![tool_delta("call_1", "bash", "{\"cmd\":\"ls\"}")];
+        t.push_response(&f1).unwrap();
+        let mut f2 = resp();
+        f2.delta_tool_calls = vec![tool_delta("", "read", "{\"path\":\"f\"}")];
+        t.push_response(&f2).unwrap();
+        let mut f3 = resp();
+        f3.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f3).unwrap();
+        let events = t.finish_success().expect("finish");
+        let ids = tool_use_ids(&events);
+        assert_eq!(ids.len(), 2, "parallel id-less call kept separate");
+        assert_eq!(ids[0], ("call_1".to_string(), "bash".to_string()));
+        assert_eq!(ids[1].1, "read");
+        assert!(ids[1].0.starts_with("devin_call_"));
+    }
+
+    #[test]
+    fn translator_invalid_json_flags_do_not_fail_early() {
+        let mut t = DevinEventTranslator::new("M".to_string());
+        let mut f = resp();
+        f.delta_tool_calls = vec![ChatToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments_json: "{}".into(),
+            invalid_json_str: "nope".into(),
+            invalid_json_err: "server-side complain".into(),
+            is_custom_tool_call: true,
+        }];
+        t.push_response(&f).unwrap();
+        let mut f2 = resp();
+        f2.stop_reason = stop_reason::FUNCTION_CALL;
+        t.push_response(&f2).unwrap();
+        t.finish_success().expect("invalid/custom flags tolerated");
+    }
+
+    #[test]
+    fn translator_tool_errors_are_not_retryable() {
+        for err in [
+            DevinWireError::Unsupported("x"),
+            DevinWireError::MalformedToolCall("x"),
+        ] {
+            let se = err.into_sampling_error();
+            assert!(!se.is_retryable(), "{se:?} must be non-retryable");
+        }
     }
 }

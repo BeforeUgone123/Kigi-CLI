@@ -138,11 +138,13 @@ fn collect_stream() -> Vec<u8> {
                 id: "call_1".to_string(),
                 name: "bash".to_string(),
                 arguments_json: "{\"cmd\":".to_string(),
+                ..Default::default()
             },
             devin::ChatToolCall {
                 id: "call_2".to_string(),
                 name: "read".to_string(),
                 arguments_json: "{\"path\":".to_string(),
+                ..Default::default()
             },
         ],
         ..Default::default()
@@ -155,11 +157,13 @@ fn collect_stream() -> Vec<u8> {
                 id: "call_1".to_string(),
                 name: String::new(),
                 arguments_json: "{\"cmd\":\"ls\"}".to_string(),
+                ..Default::default()
             },
             devin::ChatToolCall {
                 id: "call_2".to_string(),
                 name: String::new(),
                 arguments_json: "\"x\"}".to_string(),
+                ..Default::default()
             },
         ],
         ..Default::default()
