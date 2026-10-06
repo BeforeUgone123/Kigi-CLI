@@ -12,8 +12,8 @@ adversarially verified, and merged back, end to end.</p>
 writes the patch, runs the tests, and keeps going while you do something else.
 Full-screen, headless in CI with `-p`, or docked in your editor over ACP.
 
-**Already paying for Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or
-Grok? Sign in and use it.** No API key, no second bill. Rather bring your own
+**Already paying for Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot,
+Grok, or Devin? Sign in and use it.** No API key, no second bill. Rather bring your own
 key? OpenAI, Anthropic, Google, DeepSeek, Groq, Moonshot and
 [two dozen more](#providers-and-api-keys) are wired in.
 
@@ -86,7 +86,7 @@ On by default. `KIGI_GRAPH=0` turns it off; `KIGI_GRAPH_CONCURRENCY` (default
 
 ## Providers and API keys
 
-29 platforms ship compiled in: 5 you sign into, 24 you hand a key. Anything
+30 platforms ship compiled in: 6 you sign into, 24 you hand a key. Anything
 else is an endpoint you declare yourself ([your own endpoint](#your-own-endpoint)).
 
 **Sign in with a subscription you already pay for.** Run `kigi login` and pick.
@@ -100,10 +100,18 @@ credentials are never sent to another.
 | `openai-codex`   | ChatGPT Plus/Pro (Codex)  | Subscription OAuth (browser, PKCE)          |
 | `github-copilot` | GitHub Copilot            | Subscription OAuth (device code)            |
 | `xai-grok`       | xAI Grok                  | Subscription OAuth (device code)            |
+| `devin`          | Devin                     | Subscription OAuth (browser, PKCE)          |
 
 You get whatever models your plan actually serves — the list is fetched at
 sign-in, not hardcoded. (ChatGPT/Codex is the exception: its backend publishes
 no model endpoint, so those four are compiled in.)
+
+**Devin.** `kigi login` → **Devin (subscription)** opens the browser once;
+the session token lives under `oauth/devin` and drives Devin's own model
+catalog. Pick a model with `/model` (the picker lists the concrete catalog
+rows as `devin/<uid>`), or `/model devin/<catalog-uid>` directly. Kigi runs
+the agent — tools, sessions, graph, and swarm stay local; Devin serves
+inference only.
 
 **API-key providers.** Export the env var, or drop the key in
 `~/.kigi/config.toml`. Keys are never logged.
