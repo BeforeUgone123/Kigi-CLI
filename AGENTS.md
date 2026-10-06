@@ -539,8 +539,8 @@ client-side, no backend surface.
     (`pack_devin_signature`) — replayed only for a same-model final
     open-tool-loop assistant; `prune_replayed_thinking` strips it from the
     Messages wire, and the Responses builder drops it via its existing
-    foreign-item (empty-id) check. Out of scope for v1: hosted tools, native
-    JSON-schema responses (the StructuredOutput tool path covers it).
+    foreign-item (empty-id) check. Out of scope for v1: hosted tools and
+    native JSON-schema responses (the StructuredOutput tool path covers it).
   These are INTERACTIVE login rows advertised right after `kimi-code`
   (`AuthMethodKind::OAuthPlatform`, in `PlatformId::ALL` order: `xai-grok`,
   `claude-pro-max`, `github-copilot`, `openai-codex`, `devin`). The catalog fetch resolves each such platform's OWN session
