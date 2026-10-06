@@ -1791,6 +1791,7 @@ fn switch_model_holds_prompt_until_complete() {
             effort: None,
             result: Ok(None),
             prev_model_id: None,
+            config_options: None,
         }),
         &mut app,
     );

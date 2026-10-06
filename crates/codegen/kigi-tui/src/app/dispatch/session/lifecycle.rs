@@ -9,7 +9,8 @@ use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
-    SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
+    SwitchCause, get_active_agent, get_active_agent_mut, reseed_tip_for_new_session, show_welcome,
+    switch_to_agent,
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
@@ -361,6 +362,70 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         });
     }
     (agent_id, effects)
+}
+/// `/agent [name]` — open a new agent tab bound to a secondary agent
+/// backend (provider preset or `[agent_providers.<name>]` config entry).
+///
+/// Bare `/agent` lists the known provider names. A named provider spawns an
+/// external ACP agent via [`Effect::ConnectAgentBackend`]; the resulting
+/// `TaskResult::AgentBackendConnected` re-points the new tab's
+/// `AgentSession::acp_tx` at that backend and then issues `session/new`.
+pub(in crate::app::dispatch) fn dispatch_connect_agent_provider(
+    app: &mut AppView,
+    name: Option<String>,
+) -> Vec<Effect> {
+    let raw_config = kigi_shell::config::load_effective_config()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let Some(name) = name else {
+        let mut known: Vec<String> = vec!["kigi".into(), "local-devin".into(), "devin".into()];
+        if let Some(tbl) = raw_config.get("agent_providers").and_then(|t| t.as_table()) {
+            for key in tbl.keys() {
+                if !known.iter().any(|k| k == key) {
+                    known.push(key.clone());
+                }
+            }
+        }
+        if let Some(agent) = get_active_agent_mut(app) {
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Usage: /agent <name> — known providers: {}",
+                known.join(", ")
+            )));
+        }
+        return vec![];
+    };
+    let Some(command) = crate::acp::provider::resolve_provider(&name, &raw_config) else {
+        if let Some(agent) = get_active_agent_mut(app) {
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Unknown agent provider '{name}'. Add it under [agent_providers.{name}] command = \"...\" in config.toml."
+            )));
+        }
+        return vec![];
+    };
+    let Some(inbox) = app.acp_inbox_tx.clone() else {
+        if let Some(agent) = get_active_agent_mut(app) {
+            agent.scrollback.push_block(RenderBlock::system(
+                "Agent backend bus is not ready yet — try again shortly.",
+            ));
+        }
+        return vec![];
+    };
+    let (agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
+    // The new tab's session must be created on the SECONDARY backend once it
+    // connects, not on the primary channel.
+    effects.retain(|e| !matches!(e, Effect::CreateSession { .. }));
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.display_name = Some(name.clone());
+        agent.scrollback.push_block(RenderBlock::system(format!(
+            "Connecting to agent provider '{name}' ({command})…"
+        )));
+    }
+    effects.push(Effect::ConnectAgentBackend {
+        agent_id,
+        provider_name: name,
+        command,
+        inbox,
+    });
+    effects
 }
 /// Exit the current session and return to the welcome screen.
 pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<Effect> {
@@ -832,6 +897,12 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 effort,
                 prev_model_id: None,
                 model_config_id: model_config_id.clone(),
+                effort_config_option: effort.and_then(|e| {
+                    crate::acp::model_state::effort_config_option(
+                        agent.config_options.as_deref()?,
+                        e,
+                    )
+                }),
             });
         }
         if let Some(mode) = deferred_mode {
@@ -918,6 +989,12 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 effort,
                 prev_model_id: None,
                 model_config_id,
+                effort_config_option: effort.and_then(|e| {
+                    crate::acp::model_state::effort_config_option(
+                        agent.config_options.as_deref()?,
+                        e,
+                    )
+                }),
             });
         }
         if let Some(mode) = deferred_mode {
@@ -992,6 +1069,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
     }
     vec![]
 }
+#[allow(clippy::too_many_arguments)]
 pub(in crate::app::dispatch) fn handle_switch_model_complete(
     app: &mut AppView,
     agent_id: AgentId,
@@ -999,9 +1077,20 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     effort: Option<ReasoningEffort>,
     result: Result<Option<u64>, SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
+    config_options: Option<Vec<acp::SessionConfigOption>>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
+        // `session/set_config_option` echoes the full option set — refresh the
+        // cache and re-synthesize the model surface so the picker/footer
+        // reflect the agent's live values (model current + thought_level).
+        if let Some(opts) = config_options {
+            agent.config_options = Some(opts.clone());
+            if let Some(ms) = crate::acp::model_state::models_from_config_options(&opts) {
+                app.models = Some(ms).into();
+                agent.session.models = app.models.clone();
+            }
+        }
         let mut effects = match result {
             Ok(context_window) => {
                 agent.session.user_model_preference = Some(model_id.clone());

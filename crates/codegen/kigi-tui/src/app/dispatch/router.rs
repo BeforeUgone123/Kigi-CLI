@@ -61,10 +61,10 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    clear_startup_actions, dispatch_agent_type_mismatch_answered, dispatch_exit_session,
-    dispatch_new_session, dispatch_new_session_inner, dispatch_new_session_with_id,
-    dispatch_new_worktree_session, dispatch_trust_folder, open_new_session_question,
-    skip_picker_and_create_session,
+    clear_startup_actions, dispatch_agent_type_mismatch_answered, dispatch_connect_agent_provider,
+    dispatch_exit_session, dispatch_new_session, dispatch_new_session_inner,
+    dispatch_new_session_with_id, dispatch_new_worktree_session, dispatch_trust_folder,
+    open_new_session_question, skip_picker_and_create_session,
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
@@ -170,6 +170,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::NewSession => dispatch_new_session(app),
+        Action::ConnectAgentProvider { name } => dispatch_connect_agent_provider(app, name),
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
         Action::NewWorktreeSession {
@@ -760,10 +761,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return skip_picker_and_create_session(app, id);
             };
             agent.session.model_switch_pending = true;
-            let model_config_id = agent
-                .config_options
-                .as_deref()
-                .and_then(crate::acp::model_state::model_config_id);
+            let opts = agent.config_options.as_deref();
+            let model_config_id = opts.and_then(crate::acp::model_state::model_config_id);
+            let effort_config_option =
+                effort.and_then(|e| crate::acp::model_state::effort_config_option(opts?, e));
             vec![Effect::SwitchModel {
                 agent_id: id,
                 session_id,
@@ -771,6 +772,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 effort,
                 prev_model_id: None,
                 model_config_id,
+                effort_config_option,
             }]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),

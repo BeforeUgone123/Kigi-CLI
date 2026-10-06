@@ -1525,6 +1525,7 @@ pub(in crate::app::dispatch) fn set_default_model(
             effort: None,
             prev_model_id: prev_id.clone(),
             model_config_id,
+            effort_config_option: None,
         });
     } else {
         if let Some(agent) = app.agents.get_mut(&aid) {

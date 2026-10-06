@@ -221,6 +221,7 @@ impl AgentView {
             config_options: None,
             session_modes: None,
             turn_stats_line: None,
+            backend_cancel: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
             mcp_init_progress: None,

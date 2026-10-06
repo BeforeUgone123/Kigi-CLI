@@ -1119,7 +1119,23 @@ pub(crate) async fn run(
             }
         }
     });
-    let mut acp_rx = connection.rx;
+    // Merge all agent backends into one inbox: the primary connection's rx
+    // forwards here, and secondary backends (`/agent <name>`) forward their
+    // own rx into the same sender via `Effect::ConnectAgentBackend`.
+    let (acp_inbox_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<kigi_acp_lib::AcpClientMessage>();
+    {
+        let mut primary_rx = connection.rx;
+        let inbox = acp_inbox_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = primary_rx.recv().await {
+                if inbox.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    app.acp_inbox_tx = Some(acp_inbox_tx);
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
@@ -2860,7 +2876,8 @@ fn process_effects(
         is_api_key_auth: app.is_api_key_auth,
     };
     for eff in effs {
-        let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
+        let effect_tx = app.tx_for_effect(&eff);
+        let (quit, meta) = effects::execute(eff, tasks, &effect_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
             && let super::app_view::AuthState::Authenticating {

@@ -951,16 +951,16 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         });
         if let Some((model_id, effort)) = deferred {
             agent.session.model_switch_pending = true;
+            let opts = agent.config_options.as_deref();
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: hydrate_sid.clone(),
                 model_id,
                 effort,
                 prev_model_id: None,
-                model_config_id: agent
-                    .config_options
-                    .as_deref()
-                    .and_then(crate::acp::model_state::model_config_id),
+                model_config_id: opts.and_then(crate::acp::model_state::model_config_id),
+                effort_config_option: effort
+                    .and_then(|e| crate::acp::model_state::effort_config_option(opts?, e)),
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch) && agent.extensions_modal.is_some() {
