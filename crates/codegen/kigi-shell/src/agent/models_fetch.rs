@@ -113,7 +113,17 @@ pub(crate) fn models_fetch_origin(
         crate::agent::models::ModelFetchAuth::Platforms => {
             let parts: Vec<String> = enabled_platforms(has_oauth, oauth_tokens, platform_keys)
                 .into_iter()
-                .map(|p| format!("{}={}", p.as_str(), platform_models_url(p, endpoints)))
+                .map(|p| {
+                    let marker = (p == kigi_models::PlatformId::Devin)
+                        .then_some("#model-families-v1")
+                        .unwrap_or("");
+                    format!(
+                        "{}={}{}",
+                        p.as_str(),
+                        platform_models_url(p, endpoints),
+                        marker
+                    )
+                })
                 .chain(
                     platform_keys
                         .custom()
@@ -749,6 +759,7 @@ pub(crate) fn wire_model_to_entry(
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: Default::default(),
+        model_family: wire.model_family,
     }
 }
 /// Parse a single model entry from the /models response.
@@ -911,6 +922,7 @@ pub fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
+            model_family: None,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -3917,6 +3929,104 @@ mod tests {
         assert!(
             !with_real.contains("live-bearer"),
             "origin never embeds tokens"
+        );
+    }
+
+    #[test]
+    fn devin_origin_carries_family_schema_marker() {
+        use crate::agent::config::EndpointsConfig;
+        use crate::agent::models::{ModelFetchAuth, PlatformApiKeys};
+        let cfg = EndpointsConfig::default();
+        let mut tokens = OAuthSessionTokens::new();
+        tokens.insert(kigi_models::PlatformId::Devin, "tok".to_string());
+        tokens.insert(kigi_models::PlatformId::ClaudeProMax, "other".to_string());
+        let origin = models_fetch_origin(
+            &cfg,
+            ModelFetchAuth::Platforms,
+            false,
+            &tokens,
+            &PlatformApiKeys::default(),
+        );
+        let inner = origin
+            .strip_prefix("platforms[")
+            .and_then(|s| s.strip_suffix(']'))
+            .expect("platforms[...] envelope");
+        let devin_part = inner
+            .split(';')
+            .find(|p| p.starts_with("devin="))
+            .expect("devin component");
+        assert_eq!(
+            devin_part,
+            format!(
+                "devin={}#model-families-v1",
+                platform_models_url(kigi_models::PlatformId::Devin, &cfg)
+            )
+            .as_str(),
+            "devin origin carries the family schema marker: {origin}"
+        );
+        let claude_part = inner
+            .split(';')
+            .find(|p| p.starts_with("claude-pro-max="))
+            .expect("claude component");
+        assert_eq!(
+            claude_part,
+            format!(
+                "claude-pro-max={}",
+                platform_models_url(kigi_models::PlatformId::ClaudeProMax, &cfg)
+            )
+            .as_str(),
+            "non-devin origin component byte-identical: {origin}"
+        );
+    }
+
+    #[test]
+    fn devin_family_survives_wire_entry_info_and_acp_meta() {
+        let wire = kigi_models::WireModel {
+            id: "MODEL_SW_MED".to_string(),
+            display_name: Some("SWE-2 Medium".to_string()),
+            model_family: Some(kigi_models::ModelFamilyInfo {
+                id: "swe-2".to_string(),
+                name: "SWE-2".to_string(),
+                is_default: true,
+            }),
+            ..kigi_models::WireModel::bare("x".to_string())
+        };
+        let entry = platform_wire_model_to_entry(
+            kigi_models::PlatformId::Devin,
+            wire,
+            "https://server.codeium.com",
+        );
+        assert_eq!(
+            entry.id.as_deref(),
+            Some("devin/MODEL_SW_MED"),
+            "managed devin key"
+        );
+        let fam = entry.model_family.clone().expect("family on entry");
+        assert_eq!(fam.id, "swe-2");
+        assert!(fam.is_default);
+
+        let model_entry = crate::agent::config::ModelEntry::from_config_entry(&entry);
+        assert_eq!(
+            model_entry
+                .info
+                .model_family
+                .as_ref()
+                .map(|f| f.id.as_str()),
+            Some("swe-2"),
+            "ModelInfo carries the family"
+        );
+        let mut models = IndexMap::new();
+        models.insert(entry.id.clone().unwrap(), model_entry);
+        let meta = crate::agent::config::to_acp_model_info(&models)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .expect("meta present");
+        assert_eq!(
+            meta["modelFamily"],
+            serde_json::json!({"id": "swe-2", "name": "SWE-2", "isDefault": true})
         );
     }
 }
