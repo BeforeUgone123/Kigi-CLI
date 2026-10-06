@@ -404,6 +404,14 @@ fn fetch_one_platform_models(
             .collect();
         return Ok((models, None));
     }
+    if platform.listing() == kigi_models::ListingDialect::Devin {
+        let base_url = platform_fetch_base(platform, endpoints);
+        let models = crate::agent::devin_models::fetch_devin_models(platform, bearer)?
+            .into_iter()
+            .map(|wire| platform_wire_model_to_entry(platform, wire, &base_url))
+            .collect();
+        return Ok((models, None));
+    }
     let client = crate::http::shared_blocking_client();
     let url = match platform.listing() {
         kigi_models::ListingDialect::OpenAi => platform_models_url(platform, endpoints),
@@ -412,6 +420,7 @@ fn fetch_one_platform_models(
         kigi_models::ListingDialect::Anthropic => {
             format!("{}?limit=1000", platform_models_url(platform, endpoints))
         }
+        kigi_models::ListingDialect::Devin => unreachable!(),
     };
     tracing::info!(platform = platform.as_str(), url = %url, "fetching platform models");
     let request = match platform.key_header() {
@@ -504,6 +513,7 @@ fn fetch_one_platform_models(
                 }
             })?
         }
+        kigi_models::ListingDialect::Devin => unreachable!(),
     };
     // Canonicalize listing ids before filtering/enrichment/keying. Google's
     // OpenAI-compat `/models` returns `models/`-prefixed ids while its chat
@@ -691,6 +701,7 @@ pub(crate) fn wire_model_to_entry(
         }
         kigi_models::PlatformWireApi::Responses => crate::sampling::ApiBackend::Responses,
         kigi_models::PlatformWireApi::Messages => crate::sampling::ApiBackend::Messages,
+        kigi_models::PlatformWireApi::Devin => crate::sampling::ApiBackend::Devin,
     };
     let auth_scheme = match key_header {
         kigi_models::PlatformKeyHeader::Bearer => None,
@@ -3848,6 +3859,28 @@ mod tests {
         let stubs = stored_oauth_token_stubs(home.path());
         assert_eq!(stubs.len(), 1);
         assert_eq!(stubs[&kigi_models::PlatformId::ClaudeProMax], "");
+    }
+
+    #[test]
+    fn stored_oauth_platforms_devin_only_user() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut store = std::collections::BTreeMap::new();
+        store.insert(
+            "oauth/devin".to_string(),
+            crate::auth::KimiAuth::test_default(),
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_string(&store).expect("serialize store"),
+        )
+        .expect("write auth.json");
+        assert_eq!(
+            stored_oauth_platforms(home.path()),
+            vec![kigi_models::PlatformId::Devin],
+        );
+        let stubs = stored_oauth_token_stubs(home.path());
+        assert_eq!(stubs.len(), 1);
+        assert_eq!(stubs[&kigi_models::PlatformId::Devin], "");
     }
 
     /// The origin computed from presence-only stubs equals the origin the

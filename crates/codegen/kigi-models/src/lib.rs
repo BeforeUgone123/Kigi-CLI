@@ -50,6 +50,7 @@ pub enum PlatformWireApi {
     ChatCompletions,
     Responses,
     Messages,
+    Devin,
 }
 
 /// Shape + headers of a platform's model-listing endpoint.
@@ -62,6 +63,7 @@ pub enum ListingDialect {
     /// headers, Anthropic's response shape (parsed by
     /// [`parse_anthropic_listing`]).
     Anthropic,
+    Devin,
 }
 
 /// ChatCompletions body-adaptation dialect (leaf-safe mirror of the
@@ -124,6 +126,7 @@ pub enum OAuthFlow {
     /// token as `key`. GitHub's poll returns errors in a `200` body (not `4xx`),
     /// so it drives a Copilot-specific poll, not the generic device wire.
     GithubDeviceCopilot,
+    DevinPkce,
 }
 
 /// Body encoding a provider's token endpoint expects for the code-exchange and
@@ -140,6 +143,7 @@ pub enum OAuthTokenBody {
     /// the durable GitHub token (`refresh_token` field) + editor headers, which
     /// re-mints the short-lived copilot token. Dispatched to the Copilot wire.
     GithubCopilotExchange,
+    DevinSession,
 }
 
 /// Generic OAuth configuration carried by a `uses_oauth` platform whose login
@@ -308,6 +312,22 @@ pub const CODEX_OAUTH_CONFIG: OAuthConfig = OAuthConfig {
     token_body: OAuthTokenBody::Form,
     copilot_exchange: None,
     requires_chatgpt_account_id: true,
+};
+
+pub const DEVIN_OAUTH_CONFIG: OAuthConfig = OAuthConfig {
+    client_id: "",
+    auth_host: "https://app.devin.ai",
+    device_path: "/auth/cli/continue",
+    token_host: "https://api.devin.ai",
+    token_path: "/auth/cli/token",
+    scope: "",
+    scope_key: "oauth/devin",
+    extra_device_field: None,
+    authorize_extra: &[],
+    flow: OAuthFlow::DevinPkce,
+    token_body: OAuthTokenBody::DevinSession,
+    copilot_exchange: None,
+    requires_chatgpt_account_id: false,
 };
 
 /// The generic device-code OAuth config for a platform, or `None` for API-key
@@ -1286,6 +1306,32 @@ const OPENAI_CODEX_SPEC: PlatformSpec = PlatformSpec {
     strip_listing_id_prefix: None,
 };
 
+pub const DEVIN_BASE_URL_ENV: &str = "KIGI_DEVIN_BASE_URL";
+const DEVIN_SPEC: PlatformSpec = PlatformSpec {
+    id: "devin",
+    display_name: "Devin",
+    base_url: BaseUrlSource::EnvOr {
+        env: DEVIN_BASE_URL_ENV,
+        default: "https://server.codeium.com",
+    },
+    uses_oauth: true,
+    oauth: Some(&DEVIN_OAUTH_CONFIG),
+    allowed_model_prefixes: None,
+    api_key_envs: &[],
+    vendor: "Devin",
+    console_host: Some("devin.ai"),
+    login_label: Some("Devin (subscription)"),
+    models_dev_id: None,
+    wire_serves_metadata: true,
+    wire_api: PlatformWireApi::Devin,
+    listing: ListingDialect::Devin,
+    chat_compat: PlatformChatCompat::Passthrough,
+    key_header: PlatformKeyHeader::Bearer,
+    restrict_to_enriched: false,
+    key_validation_path: None,
+    strip_listing_id_prefix: None,
+};
+
 /// The platform registry. Platforms are compiled-in spec rows; user-declared
 /// providers live in [`custom`], never here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1352,12 +1398,13 @@ pub enum PlatformId {
     /// ChatGPT Codex backend (Responses wire reached with an OAuth bearer +
     /// the `chatgpt-account-id` JWT claim). HARDCODED catalog, no live listing.
     OpenaiCodex,
+    Devin,
 }
 
 impl PlatformId {
     /// All platforms, in catalog precedence order: the subscription channel
     /// first so "default model = first list item" favors it when present.
-    pub const ALL: [PlatformId; 29] = [
+    pub const ALL: [PlatformId; 30] = [
         Self::KimiCode,
         Self::MoonshotCn,
         Self::MoonshotAi,
@@ -1387,6 +1434,7 @@ impl PlatformId {
         Self::ClaudeProMax,
         Self::GithubCopilot,
         Self::OpenaiCodex,
+        Self::Devin,
     ];
 
     /// The registry row backing this platform (single source of per-platform
@@ -1422,6 +1470,7 @@ impl PlatformId {
             Self::ClaudeProMax => &CLAUDE_PRO_MAX_SPEC,
             Self::GithubCopilot => &GITHUB_COPILOT_SPEC,
             Self::OpenaiCodex => &OPENAI_CODEX_SPEC,
+            Self::Devin => &DEVIN_SPEC,
         }
     }
 
@@ -2697,6 +2746,52 @@ mod tests {
         assert_eq!(c.base_url(), "https://mock.codex/codex");
     }
 
+    #[test]
+    fn devin_is_a_native_pkce_oauth_platform() {
+        let d = PlatformId::Devin;
+        assert_eq!(d.as_str(), "devin");
+        assert!(d.uses_oauth());
+        let cfg = d.oauth().expect("devin carries a DevinPkce OAuthConfig");
+        assert_eq!(cfg, &DEVIN_OAUTH_CONFIG);
+        assert_eq!(cfg.auth_host, "https://app.devin.ai");
+        assert_eq!(cfg.device_path, "/auth/cli/continue");
+        assert_eq!(cfg.token_host, "https://api.devin.ai");
+        assert_eq!(cfg.token_path, "/auth/cli/token");
+        assert_eq!(cfg.scope_key, "oauth/devin");
+        assert_eq!(cfg.client_id, "");
+        assert_eq!(cfg.scope, "");
+        for other in PlatformId::ALL {
+            if other != PlatformId::Devin
+                && let Some(o) = other.oauth()
+            {
+                assert!(
+                    !o.client_id.is_empty(),
+                    "{} must name a client id",
+                    other.as_str()
+                );
+            }
+        }
+        assert_eq!(cfg.flow, OAuthFlow::DevinPkce);
+        assert_eq!(cfg.token_body, OAuthTokenBody::DevinSession);
+        assert_eq!(cfg.authorize_extra, &[] as &[(&str, &str)]);
+        assert!(!cfg.requires_chatgpt_account_id);
+        assert_eq!(
+            oauth_config_for_scope_key("oauth/devin"),
+            Some(&DEVIN_OAUTH_CONFIG)
+        );
+        assert_eq!(d.models_dev_id(), None);
+        assert_eq!(d.wire_api(), PlatformWireApi::Devin);
+        assert_eq!(d.listing(), ListingDialect::Devin);
+        assert!(d.wire_serves_metadata());
+        assert!(!d.restrict_to_enriched());
+        assert!(d.hardcoded_catalog().is_none());
+        assert_eq!(d.api_key_env_names(), &[] as &[&str]);
+        assert_eq!(d.managed_model_key("swe-1-7"), "devin/swe-1-7");
+        assert_eq!(d.base_url(), "https://server.codeium.com");
+        let _guard = kigi_env::EnvVarGuard::set(DEVIN_BASE_URL_ENV, "https://mock.devin");
+        assert_eq!(d.base_url(), "https://mock.devin");
+    }
+
     /// The HARDCODED openai-codex catalog is exactly the 8 supported+listed
     /// models, keyed by slug, ctx 272000, each exposing its exact supported
     /// efforts (incl. the codex-only `xhigh`/`max` tiers). The hidden models
@@ -2894,10 +2989,11 @@ mod tests {
                 PlatformId::ClaudeProMax => 26,
                 PlatformId::GithubCopilot => 27,
                 PlatformId::OpenaiCodex => 28,
+                PlatformId::Devin => 29,
             }
         }
         // update together with `ordinal`
-        const VARIANT_COUNT: usize = 29;
+        const VARIANT_COUNT: usize = 30;
         let mut seen: Vec<usize> = PlatformId::ALL.iter().map(|&p| ordinal(p)).collect();
         seen.sort_unstable();
         seen.dedup();

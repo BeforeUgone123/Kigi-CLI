@@ -453,9 +453,59 @@ client-side, no backend surface.
     Copilot policy is unconfigured can list yet `403` at inference until the user
     enables it once in GitHub's UI — a deliberate omission (it mutates account
     state and is unverifiable without a live Copilot account), not a silent gap.
+  - `OAuthFlow::DevinPkce` → `auth::devin` (native Connect/protobuf provider).
+    Provider: `devin` (`scope_key oauth/devin`, inference base
+    `https://server.codeium.com`, `KIGI_DEVIN_BASE_URL` override,
+    `PlatformWireApi::Devin` / `ApiBackend::Devin` /
+    `ListingDialect::Devin`). LOGIN: PKCE S256 with an independent random
+    `state`, loopback `127.0.0.1:59653/callback` bound BEFORE the authorize
+    URL is published (ephemeral port only on AddrInUse or in tests); the
+    authorize query is EXACTLY `redirect_uri,state,prompt=select_account,
+    code_challenge,code_challenge_method` — the dialect carries no
+    client_id/response_type/scope. The manual-paste path accepts ONLY this
+    login's exact callback URL (`parse_devin_callback`: matching
+    scheme/host/port/path, no userinfo/fragment, exactly one `code` plus the
+    matching `state`; bare codes and `code#state` are rejected). Exchange
+    POSTs JSON `{code,code_verifier}`
+    to `api.devin.ai/auth/cli/token` for `{token}`: a SESSION token, NOT a
+    refresh token — `OAuthTokenBody::DevinSession` makes the generic
+    refresher return permanent failure with ZERO token-host HTTP (no fake
+    refresh); expiry/revocation means re-login. Opaque tokens carry no server
+    TTL (the 30-day Kigi fallback applies); JWT `exp` is honored when present.
+    WIRE (`kigi_sampling_types::devin`, pure, no I/O): minimal prost structs
+    over the `exa.*` schemas. Auth NEVER rides an HTTP header — the session
+    token is normalized once to `devin-session-token$…` and travels inside
+    `Metadata.api_key` (`disable_telemetry` always true; released-CLI identity
+    `devin-cli/chisel` `3000.11.3` for chat/auth, `chisel` `0.0.0-dev` for
+    discovery). Unary `GetUserJwt` mints a per-request user JWT (a
+    `custom_api_server_url` that differs from the configured base fails
+    CLOSED — configure the endpoint explicitly; enterprise reroute is
+    deferred), then `GetChatMessage` streams a Connect frame sequence
+    (`application/connect+proto`, flags 0x01 gzip / 0x02 end-stream) through a
+    redirect-NONE client with 16 MiB bounds on both wire and decompressed
+    payloads; an oversize advertisement fails before any payload byte is
+    staged, and bytes after the end trailer are a hard error, never success.
+    CATALOG: unary `GetCliModelConfigs` → `ClientModelConfig` rows
+    (nested `ModelInfo` wins context/capabilities; disabled, blank-uid,
+    router, and features-declared-no-tool-calls rows excluded; each concrete
+    UID stays separately selectable — no AssignModel, no effort collapsing).
+    STREAMING: `DevinEventTranslator` emits Anthropic-Messages events so the
+    existing `stream_messages` L2 keeps reasoning/tool/usage/cancel/idle
+    semantics; `message_stop` only after a valid end trailer (error trailers
+    map the fixed Connect code vocabulary to status — anything else reads
+    `unrecognized`/502; EOF is never success). Usage buckets:
+    tag2 input(uncached), 3 output, 4 cache-write, 5 cache-read. REPLAYED
+    THINKING uses a `kigi-devin-v1:` JSON provenance envelope
+    (`pack_devin_signature`) — replayed only for a same-model final
+    open-tool-loop assistant; `prune_replayed_thinking` strips it from the
+    Messages wire, and the Responses builder drops it via its existing
+    foreign-item (empty-id) check. Out of scope for v1: hosted tools, native
+    JSON-schema responses (the StructuredOutput tool path covers it), and the
+    `--provider devin` ACP mode (unchanged — that runs Devin's own agent, not
+    Kigi's).
   These are INTERACTIVE login rows advertised right after `kimi-code`
   (`AuthMethodKind::OAuthPlatform`, in `PlatformId::ALL` order: `xai-grok`,
-  `claude-pro-max`, `github-copilot`, `openai-codex`). The catalog fetch resolves each such platform's OWN session
+  `claude-pro-max`, `github-copilot`, `openai-codex`, `devin`). The catalog fetch resolves each such platform's OWN session
   token (`resolve_generic_oauth_tokens`, refreshed on expiry) and routes
   `platform.oauth().is_some()` → `platform.base_url()` (kimi-code alone →
   `proxy_url()`). Tokens/codes/verifiers are NEVER logged.
