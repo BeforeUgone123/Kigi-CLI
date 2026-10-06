@@ -11,3 +11,6 @@ node_modules/
 
 # Local test credentials
 cred.md
+
+# Upstream xai-org/grok-build reference clone
+/grok-build/
