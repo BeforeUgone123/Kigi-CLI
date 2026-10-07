@@ -115,7 +115,7 @@ pub(crate) fn models_fetch_origin(
                 .into_iter()
                 .map(|p| {
                     let marker = if p == kigi_models::PlatformId::Devin {
-                        "#model-families-fusion-v2"
+                        "#model-families-fusion-v3"
                     } else {
                         ""
                     };
@@ -3962,7 +3962,7 @@ mod tests {
         assert_eq!(
             devin_part,
             format!(
-                "devin={}#model-families-fusion-v2",
+                "devin={}#model-families-fusion-v3",
                 platform_models_url(kigi_models::PlatformId::Devin, &cfg)
             )
             .as_str(),
