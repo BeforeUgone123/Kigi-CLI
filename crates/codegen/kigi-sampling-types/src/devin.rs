@@ -32,6 +32,11 @@ const DEVIN_CLI_EXTENSION_NAME: &str = "chisel";
 const DEVIN_CLI_EXTENSION_VERSION: &str = "3000.11.3";
 const DEVIN_DISCOVERY_VERSION: &str = "0.0.0-dev";
 const DEVIN_LOCALE: &str = "en";
+/// `Metadata` tag 30 as the released CLI (3000.11.3) sends it on
+/// `GetCliModelConfigs`. Without it the server withholds every router row —
+/// the `fusion-…` pairs and `adaptive` — and answers the concrete models only.
+/// The field's schema name is not known; the values are opaque.
+const DEVIN_DISCOVERY_CAPABILITIES: [i32; 5] = [3, 4, 6, 7, 8];
 
 const DEVIN_STOP_PATTERNS: [&str; 5] = [
     concat!("<", "|user|>"),
@@ -141,6 +146,8 @@ pub struct Metadata {
     pub user_jwt: String,
     #[prost(string, tag = "28")]
     pub ide_type: String,
+    #[prost(int32, repeated, tag = "30")]
+    pub client_capabilities: Vec<i32>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -499,6 +506,7 @@ pub fn devin_cli_metadata(
         disable_telemetry: true,
         request_id,
         session_id: session_id.to_string(),
+        client_capabilities: Vec::new(),
     }
 }
 
@@ -514,6 +522,7 @@ pub fn devin_discovery_metadata(api_key_wire: &str, request_id: u64, session_id:
         disable_telemetry: true,
         request_id,
         session_id: session_id.to_string(),
+        client_capabilities: DEVIN_DISCOVERY_CAPABILITIES.to_vec(),
         ..Default::default()
     }
 }
@@ -1536,6 +1545,14 @@ mod tests {
         assert_eq!(disc.extension_version, "0.0.0-dev");
         assert_eq!(disc.ide_type, "");
         assert!(disc.disable_telemetry);
+        assert_eq!(disc.client_capabilities, [3, 4, 6, 7, 8]);
+        assert!(
+            disc.encode_to_vec()
+                .windows(7)
+                .any(|w| w == [0xf2, 0x01, 0x05, 3, 4, 6, 7]),
+            "tag 30 goes out packed, as the released CLI sends it"
+        );
+        assert!(meta.client_capabilities.is_empty());
     }
 
     #[test]

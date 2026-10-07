@@ -499,11 +499,16 @@ client-side, no backend surface.
     name / `devin/<family.id>` / `devin/<family.name>` aliases resolve the
     flagged default variant (first member when unflagged), while exact
     concrete ids and full variant names always win. The Devin component of
-    the models disk-cache origin is suffixed `#model-families-fusion-v2` so
-    pre-family cached catalogs refetch. FUSION rows (`fusion-<lead
+    the models disk-cache origin is suffixed `#model-families-fusion-v3` so
+    cached catalogs from before a catalog-shape change refetch. ROUTER rows
+    (the `fusion-…` pairs, `adaptive`) are served ONLY when the discovery
+    `Metadata` carries tag 30 = packed `[3,4,6,7,8]`, read off the released
+    CLI's own request on 2026-10-06; without it the server answers the 260
+    concrete models and `/fusion` stays hidden. FUSION rows (`fusion-<lead
     uid>-sidekick-<helper uid>` routers) project in a second pass against
     the eligible-concrete index — a pair row only materializes when BOTH
-    component uids survive the ordinary filters (never synthesized, never
+    component uids survive the ordinary filters (a `-fast` lead segment
+    resolves the `-priority` concrete, the GPT speed-variant spelling) (never synthesized, never
     disabled/malformed); it clones the lead's capabilities/context and
     carries `WireModel.fusion` (`{lead,sidekick,leadModel,sidekickModel}`
     → `_meta.fusion`). At sampling time a fusion uid runs

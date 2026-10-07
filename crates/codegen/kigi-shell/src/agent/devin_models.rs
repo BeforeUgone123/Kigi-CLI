@@ -167,6 +167,18 @@ fn fusion_family(cfg: &devin::ClientModelConfig) -> kigi_models::ModelFamilyInfo
     }
 }
 
+/// The concrete model a fusion row's lead segment names. GPT speed variants
+/// are spelled `-fast` inside a router uid but `-priority` as a concrete uid.
+fn fusion_lead<'a>(
+    concrete: &'a std::collections::HashMap<String, WireModel>,
+    lead_uid: &str,
+) -> Option<&'a WireModel> {
+    concrete.get(lead_uid).or_else(|| {
+        let base = lead_uid.strip_suffix("-fast")?;
+        concrete.get(&format!("{base}-priority"))
+    })
+}
+
 pub(crate) fn devin_configs_to_wire_models(
     response: devin::GetCliModelConfigsResponse,
 ) -> Result<Vec<WireModel>, BackendError> {
@@ -190,7 +202,7 @@ pub(crate) fn devin_configs_to_wire_models(
         }
         if let Some((lead_uid, helper_uid)) = devin::fusion_model_uids(uid) {
             let (Some(lead_wire), Some(helper_wire)) =
-                (concrete.get(lead_uid), concrete.get(helper_uid))
+                (fusion_lead(&concrete, lead_uid), concrete.get(helper_uid))
             else {
                 continue;
             };
@@ -530,6 +542,34 @@ mod tests {
             ("fusion", "Fusion")
         );
         assert!(models[1].fusion.is_none() && models[2].fusion.is_none());
+    }
+
+    #[test]
+    fn catalog_fusion_fast_lead_resolves_the_priority_concrete() {
+        let resp = devin::GetCliModelConfigsResponse {
+            client_model_configs: vec![
+                fusion_router(
+                    "fusion-gpt-test-high-fast-sidekick-swe-test-medium",
+                    "Fusion (GPT Test High Fast + SWE Test Medium)",
+                ),
+                fusion_router("fusion-absent-fast-sidekick-swe-test-medium", "Orphan"),
+                labelled_featured("gpt-test-high-priority", "GPT Test High Fast", true),
+                labelled_featured("swe-test-medium", "SWE Test Medium", true),
+            ],
+        };
+        let models = devin_configs_to_wire_models(resp).expect("project");
+        let pairs: Vec<&WireModel> = models.iter().filter(|m| m.fusion.is_some()).collect();
+        assert_eq!(
+            pairs.len(),
+            1,
+            "a lead with no concrete in either spelling is dropped"
+        );
+        let fusion = pairs[0].fusion.as_ref().expect("fusion dto");
+        assert_eq!(fusion.lead, "GPT Test High Fast");
+        assert_eq!(
+            fusion.lead_model, "gpt-test-high-fast",
+            "the pair keeps the router's own spelling, which the subagent guard re-parses"
+        );
     }
 
     #[test]
